@@ -2,7 +2,7 @@
 # =============================================================================
 # Raspberry Pi Hardening Script — "Don't Get Pwned" Edition
 #
-# Goal: Create an AI agent user that can wreak havoc on projects
+# Goal: Create a sandboxed AI agent account that can wreak havoc on projects
 #       but CANNOT escalate privileges, steal credentials, or
 #       pivot to your home network.
 #
@@ -83,7 +83,7 @@ echo "================================================"
 echo ""
 
 # Ask for main username
-read -p "  Enter YOUR username on this Pi: " MAIN_USER
+read -p "  Enter YOUR Linux username on this Pi: " MAIN_USER
 
 if [[ -z "$MAIN_USER" ]]; then
     err "Username cannot be empty."
@@ -91,7 +91,7 @@ if [[ -z "$MAIN_USER" ]]; then
 fi
 
 if ! id "$MAIN_USER" &>/dev/null; then
-    err "User '$MAIN_USER' does not exist on this system."
+    err "Account '$MAIN_USER' does not exist on this system."
     exit 1
 fi
 
@@ -107,13 +107,13 @@ if [[ ! "$AI_USER" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
 fi
 
 if [ "$AI_USER" = "$MAIN_USER" ]; then
-    err "AI user cannot be the same as main user ($MAIN_USER)"
+    err "AI agent account cannot be the same as your account ($MAIN_USER)"
     exit 1
 fi
 
 echo ""
-echo "  Main user: $MAIN_USER"
-echo "  AI user:   $AI_USER"
+echo "  Your account:      $MAIN_USER"
+echo "  AI agent account:  $AI_USER"
 echo ""
 read -p "  Start hardening? (y/n) " -n 1 -r
 echo ""
@@ -160,7 +160,7 @@ fi
 
 confirm_step 2 "Lock down your home directory" \
 "Sets /home/$MAIN_USER to mode 700 (owner-only access).
-The AI user won't be able to list, read, or enter your home directory.
+The AI agent won't be able to list, read, or enter your home directory.
 This protects your SSH keys, .env files, API tokens, bash history,
 and any other personal files. Also tightens .ssh permissions." \
 "$STEP2_DONE" && {
@@ -178,7 +178,7 @@ fi
 
 
 # =============================================================================
-# STEP 3: Ensure AI user has NO sudo access
+# STEP 3: Ensure AI agent has NO sudo access
 # =============================================================================
 
 STEP3_DONE=""
@@ -187,10 +187,10 @@ if [ -f "$SUDOERS_FILE" ] && ! groups "$AI_USER" 2>/dev/null | grep -q '\bsudo\b
     STEP3_DONE="$AI_USER is not in sudo group and $SUDOERS_FILE exists."
 fi
 
-confirm_step 3 "Block sudo access for AI user" \
-"Without sudo, the AI user cannot become root, install system packages,
+confirm_step 3 "Block sudo access for AI agent" \
+"Without sudo, the AI agent cannot become root, install system packages,
 or modify system config. Even if fully compromised, the attacker is
-stuck as an unprivileged user. This is the single most important wall.
+stuck as an unprivileged account. This is the single most important wall.
 Creates an explicit deny rule in /etc/sudoers.d/ as a safety net." \
 "$STEP3_DONE" && {
 
@@ -210,7 +210,7 @@ log "Created explicit sudo deny rule"
 
 
 # =============================================================================
-# STEP 4: Block AI user from your home network (LAN)
+# STEP 4: Block AI agent from your home network (LAN)
 # =============================================================================
 
 STEP4_DONE=""
@@ -222,7 +222,7 @@ if id "$AI_USER" &>/dev/null; then
     fi
 fi
 
-confirm_step 4 "Block AI user from LAN access" \
+confirm_step 4 "Block AI agent from LAN access" \
 "THE BIG ONE. If the AI gets compromised, an attacker will try to scan
 your local network — router, NAS, other computers, smart home devices.
 These iptables rules block ALL traffic from '$AI_USER' to private IPs:
@@ -269,7 +269,7 @@ if [ -f "/etc/security/limits.d/${AI_USER}.conf" ]; then
     STEP5_DONE="Limits file /etc/security/limits.d/${AI_USER}.conf already exists."
 fi
 
-confirm_step 5 "Set resource limits for AI user" \
+confirm_step 5 "Set resource limits for AI agent" \
 "Prevents the AI from taking down your Pi via:
   • Fork bomb → capped at 200 processes
   • Memory exhaustion → capped at 2GB virtual memory
@@ -311,12 +311,12 @@ fi
 
 confirm_step 6 "Make critical system files immutable" \
 "Sets the immutable flag (chattr +i) on:
-  • /etc/passwd   — user accounts
+  • /etc/passwd   — Linux accounts
   • /etc/shadow   — password hashes
   • /etc/sudoers  — sudo permissions
   • /etc/group    — group memberships
 This prevents ANYONE — even root — from modifying these files without
-first removing the flag. Stops an attacker from adding a backdoor user
+first removing the flag. Stops an attacker from adding a rogue account
 or granting themselves sudo.
 ⚠️  To edit later: sudo chattr -i <file>, make changes, sudo chattr +i <file>" \
 "$STEP6_DONE" && {
@@ -394,7 +394,7 @@ fi
 confirm_step 8 "Harden SSH configuration" \
 "SSH is the front door to your Pi. This step:
   • Disables password login → key-only, can't be brute forced
-  • Disables root login → must SSH as your user, then sudo
+  • Disables root login → must SSH as your account, then sudo
   • Blocks '$AI_USER' from SSH login entirely
   • Limits auth attempts to 3
   • Disables X11 and agent forwarding
@@ -485,7 +485,7 @@ fi
 
 confirm_step 10 "Enable automatic security updates" \
 "Kernel and system exploits are discovered regularly. If an attacker
-compromises the AI user and finds an unpatched local privilege
+compromises the AI agent and finds an unpatched local privilege
 escalation — game over. This enables daily automatic security patches
 from Debian/Raspbian repos. NO auto-reboot — you control when to
 reboot. Installs unattended-upgrades if not present." \
@@ -534,7 +534,7 @@ confirm_step 11 "Create separated project directories" \
 "Creates two isolated directories:
   • /srv/$MAIN_USER  → YOUR projects (mode 700, only you can access)
   • /srv/$AI_USER    → AI's playground (mode 700, only it can access)
-Neither user can read, write, or even list the other's directory." \
+Neither account can read, write, or even list the other's directory." \
 "$STEP11_DONE" && {
 
 mkdir -p "/srv/$MAIN_USER"
@@ -716,8 +716,8 @@ echo "================================================"
 echo "  ✅ Hardening Complete!"
 echo "================================================"
 echo ""
-echo "  Main user:  $MAIN_USER"
-echo "  AI user:    $AI_USER"
+echo "  Your account:      $MAIN_USER"
+echo "  AI agent account:  $AI_USER"
 echo ""
 echo "  Protected against:            How:"
 echo "  ─────────────────────────────────────────────"

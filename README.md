@@ -118,7 +118,7 @@ Internet
 **Why two Caddy instances?**
 
 - **Main Caddy** is owned by root. The AI can't modify `/etc/caddy/Caddyfile`, so it can't intercept traffic meant for your projects, add rogue routes, or disable HTTPS.
-- **AI Caddy** runs as the AI user on port 4000. It gets traffic only for `ai.YOUR_DOMAIN`, and routes it to whatever the AI is running on high ports. The AI can reload it without sudo:
+- **AI Caddy** runs as the AI agent on port 4000. It gets traffic only for `ai.YOUR_DOMAIN`, and routes it to whatever the AI is running on high ports. The AI can reload it without sudo:
   ```bash
   caddy reload --config /srv/<ai-user>/Caddyfile --address localhost:2020
   ```
@@ -137,13 +137,13 @@ The script is safe to re-run. Each step checks if it's already been applied:
 
 ```
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  Step 3: Block sudo access for AI user
+  Step 3: Block sudo access for AI agent
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
   ✓ Already done:
     ai-agent is not in sudo group and /etc/sudoers.d/ai-agent-deny exists.
 
-    Without sudo, the AI user cannot become root...
+    Without sudo, the AI agent cannot become root...
 
   Re-apply anyway? (y/n/q to quit)
 ```
