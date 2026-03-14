@@ -1,0 +1,22 @@
+# =============================================================================
+# Main Caddyfile — owned by root, AI cannot modify
+# Copy to /etc/caddy/Caddyfile and replace YOUR_DOMAIN
+# =============================================================================
+
+# Your projects — add/remove as needed
+bloodhound.YOUR_DOMAIN {
+    reverse_proxy localhost:3000
+}
+
+kaal.YOUR_DOMAIN {
+    reverse_proxy localhost:3001
+}
+
+tribute.YOUR_DOMAIN {
+    reverse_proxy localhost:3002
+}
+
+# AI sandbox — single entry point to AI's own Caddy
+ai.YOUR_DOMAIN {
+    reverse_proxy localhost:4000
+}

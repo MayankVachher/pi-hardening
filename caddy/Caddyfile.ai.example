@@ -1,0 +1,30 @@
+# =============================================================================
+# AI Sandbox Caddyfile — owned by ai-agent, fully under AI's control
+# Located at /srv/<ai-user>/Caddyfile
+#
+# No TLS needed here — main Caddy terminates HTTPS and proxies to :4000.
+# AI reloads this config without sudo via:
+#   caddy reload --config /srv/<ai-user>/Caddyfile --address localhost:2020
+# =============================================================================
+
+{
+    # Separate admin API so it doesn't conflict with main Caddy (:2019)
+    admin localhost:2020
+}
+
+:4000 {
+    # Example routes — AI adds/removes these as it deploys projects
+
+    handle_path /dash/* {
+        reverse_proxy localhost:4001
+    }
+
+    handle_path /api/* {
+        reverse_proxy localhost:4002
+    }
+
+    # Default response
+    handle {
+        respond "ai sandbox is running" 200
+    }
+}

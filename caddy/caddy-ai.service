@@ -1,0 +1,29 @@
+# =============================================================================
+# Systemd service for AI's Caddy instance
+# Copy to /etc/systemd/system/caddy-ai.service
+# Replace AI_USER with your AI agent username
+# =============================================================================
+
+[Unit]
+Description=Caddy AI Sandbox
+Documentation=https://caddyserver.com/docs/
+After=network.target network-online.target caddy.service
+Wants=network-online.target
+
+[Service]
+User=AI_USER
+Group=AI_USER
+ExecStart=/usr/bin/caddy run --config /srv/AI_USER/Caddyfile
+ExecReload=/usr/bin/caddy reload --config /srv/AI_USER/Caddyfile --address localhost:2020
+WorkingDirectory=/srv/AI_USER
+Restart=always
+RestartSec=5
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/srv/AI_USER
+
+[Install]
+WantedBy=multi-user.target

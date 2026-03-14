@@ -535,6 +535,121 @@ end
 
 
 # =============================================================================
+# STEP 12: Install and configure Caddy (reverse proxy)
+# =============================================================================
+
+set STEP12_DONE ""
+if command -v caddy &>/dev/null; and test -f /etc/caddy/Caddyfile; and test -f /srv/$AI_USER/Caddyfile
+    set STEP12_DONE "Caddy is installed, main Caddyfile and AI Caddyfile both exist."
+end
+
+if confirm_step 12 "Install and configure Caddy" \
+"Sets up Caddy as a reverse proxy with two instances:
+  • Main Caddy (root, :443) — handles HTTPS, routes to your apps + AI
+  • AI Caddy ($AI_USER, :4000) — AI controls its own routing
+The AI can reload its own Caddy via admin API (no sudo needed).
+Main Caddyfile is owned by root — AI cannot modify it.
+You'll need to edit /etc/caddy/Caddyfile to set your domain name." \
+"$STEP12_DONE"
+
+    # Install Caddy if not present
+    if not command -v caddy &>/dev/null
+        apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https curl
+        curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+        curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list
+        apt-get update -qq
+        apt-get install -y -qq caddy
+        log "Caddy installed"
+    else
+        log "Caddy already installed"
+    end
+
+    # Detect script directory for config templates
+    set SCRIPT_DIR (cd (dirname (status filename)); and pwd)
+
+    # Set up main Caddyfile if not present
+    if not test -f /etc/caddy/Caddyfile; or not grep -q "reverse_proxy" /etc/caddy/Caddyfile
+        if test -f "$SCRIPT_DIR/caddy/Caddyfile.example"
+            cp "$SCRIPT_DIR/caddy/Caddyfile.example" /etc/caddy/Caddyfile
+        else
+            echo '# Replace YOUR_DOMAIN with your actual domain
+
+# Your projects
+# bloodhound.YOUR_DOMAIN {
+#     reverse_proxy localhost:3000
+# }
+
+# AI sandbox entry point
+# ai.YOUR_DOMAIN {
+#     reverse_proxy localhost:4000
+# }' > /etc/caddy/Caddyfile
+        end
+        log "Main Caddyfile created at /etc/caddy/Caddyfile"
+        warn "Edit /etc/caddy/Caddyfile to set your domain name!"
+    else
+        log "Main Caddyfile already exists"
+    end
+
+    chown root:root /etc/caddy/Caddyfile
+    chmod 644 /etc/caddy/Caddyfile
+
+    # Set up AI's Caddyfile
+    if not test -f /srv/$AI_USER/Caddyfile
+        if test -f "$SCRIPT_DIR/caddy/Caddyfile.ai.example"
+            cp "$SCRIPT_DIR/caddy/Caddyfile.ai.example" /srv/$AI_USER/Caddyfile
+        else
+            echo '{
+    admin localhost:2020
+}
+
+:4000 {
+    handle {
+        respond "ai sandbox is running" 200
+    }
+}' > /srv/$AI_USER/Caddyfile
+        end
+        log "AI Caddyfile created at /srv/$AI_USER/Caddyfile"
+    end
+
+    chown $AI_USER:$AI_USER /srv/$AI_USER/Caddyfile
+    chmod 644 /srv/$AI_USER/Caddyfile
+
+    # Set up systemd service for AI's Caddy
+    echo "[Unit]
+Description=Caddy AI Sandbox
+After=network.target caddy.service
+
+[Service]
+User=$AI_USER
+Group=$AI_USER
+ExecStart=/usr/bin/caddy run --config /srv/$AI_USER/Caddyfile
+ExecReload=/usr/bin/caddy reload --config /srv/$AI_USER/Caddyfile --address localhost:2020
+WorkingDirectory=/srv/$AI_USER
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/srv/$AI_USER
+
+[Install]
+WantedBy=multi-user.target" > /etc/systemd/system/caddy-ai.service
+
+    systemctl daemon-reload
+    systemctl enable caddy
+    systemctl enable caddy-ai
+
+    # Start services
+    systemctl restart caddy
+    systemctl restart caddy-ai
+
+    log "Main Caddy running on :443"
+    log "AI Caddy running on :4000 (owned by $AI_USER)"
+    log "AI reloads via: caddy reload --config /srv/$AI_USER/Caddyfile --address localhost:2020"
+end
+
+
+# =============================================================================
 # DONE
 # =============================================================================
 
@@ -556,8 +671,14 @@ echo "  SSH brute force               Key-only + fail2ban"
 echo "  Unpatched exploits            Auto security updates"
 echo "  SUID abuse                    Audited + neutered"
 echo ""
+echo "  Caddy:"
+echo "  Main Caddyfile:  /etc/caddy/Caddyfile (edit to set your domain)"
+echo "  AI Caddyfile:    /srv/$AI_USER/Caddyfile (AI controls this)"
+echo "  AI reloads via:  caddy reload --config /srv/$AI_USER/Caddyfile --address localhost:2020"
+echo ""
 echo "  ⚠️  BEFORE YOU REBOOT:"
 echo "  1. Verify SSH key is in /home/$MAIN_USER/.ssh/authorized_keys"
 echo "  2. Test SSH in a NEW terminal"
 echo "  3. Then: sudo systemctl restart ssh"
+echo "  4. Edit /etc/caddy/Caddyfile to set your domain"
 echo ""

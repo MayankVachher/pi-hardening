@@ -18,7 +18,7 @@ The script will ask for your username and the AI account name, then walk you thr
 
 ## What It Does
 
-The script runs 11 steps, each explained and requiring your confirmation:
+The script runs 12 steps, each explained and requiring your confirmation:
 
 | Step | What | Why |
 |------|-------|-----|
@@ -33,6 +33,7 @@ The script runs 11 steps, each explained and requiring your confirmation:
 | 9 | Install fail2ban | Auto-bans IPs after failed login attempts |
 | 10 | Auto security updates | Daily patches for kernel/system exploits |
 | 11 | Create project directories | Separated /srv dirs with strict permissions |
+| 12 | Install & configure Caddy | Dual reverse proxy — you own routing, AI owns its sandbox |
 
 ## Features
 
@@ -76,11 +77,59 @@ After running:
 /srv/
 ├── <your-user>/      ← YOUR projects (mode 700, only you)
 └── <ai-user>/        ← AI's playground (mode 700, only it)
+    └── Caddyfile     ← AI's reverse proxy config (it controls this)
+
+/etc/caddy/
+└── Caddyfile         ← Main reverse proxy config (root-owned, AI can't touch)
 
 /home/
 ├── <your-user>/      ← Locked down (mode 700)
 └── <ai-user>/        ← AI's home directory
 ```
+
+## Caddy Architecture
+
+The setup uses **two Caddy instances** to separate routing control:
+
+```
+Internet
+    │
+    ▼
+┌─────────────────────────────┐
+│  Main Caddy (root, :443)    │ ← HTTPS termination, root-owned config
+│  /etc/caddy/Caddyfile       │
+├─────────────────────────────┤
+│  bloodhound.domain → :3000  │
+│  kaal.domain       → :3001  │
+│  tribute.domain    → :3002  │
+│  ai.domain         → :4000 ─┼───┐
+└─────────────────────────────┘   │
+                                  ▼
+                    ┌──────────────────────────┐
+                    │  AI Caddy (ai-user, :4000)│ ← AI-owned config
+                    │  /srv/<ai-user>/Caddyfile │
+                    ├──────────────────────────┤
+                    │  /dash/* → :4001          │
+                    │  /api/*  → :4002          │
+                    │  default → "sandbox ok"   │
+                    └──────────────────────────┘
+```
+
+**Why two Caddy instances?**
+
+- **Main Caddy** is owned by root. The AI can't modify `/etc/caddy/Caddyfile`, so it can't intercept traffic meant for your projects, add rogue routes, or disable HTTPS.
+- **AI Caddy** runs as the AI user on port 4000. It gets traffic only for `ai.YOUR_DOMAIN`, and routes it to whatever the AI is running on high ports. The AI can reload it without sudo:
+  ```bash
+  caddy reload --config /srv/<ai-user>/Caddyfile --address localhost:2020
+  ```
+
+**Config files:**
+
+| File | Purpose | Owned by |
+|------|---------|----------|
+| `caddy/Caddyfile.example` | Template for main Caddy | root |
+| `caddy/Caddyfile.ai.example` | Template for AI's Caddy | ai-user |
+| `caddy/caddy-ai.service` | Systemd unit for AI's Caddy | root |
 
 ## Re-running the Script
 
