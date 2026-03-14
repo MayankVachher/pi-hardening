@@ -565,8 +565,21 @@ confirm_step 12 "Install and configure Caddy" \
   • AI Caddy ($AI_USER, :4000) — AI controls its own routing
 The AI can reload its own Caddy via admin API (no sudo needed).
 Main Caddyfile is owned by root — AI cannot modify it.
-You'll need to edit /etc/caddy/Caddyfile to set your domain name." \
+You'll be prompted for your domain name (e.g. example.com)." \
 "$STEP12_DONE" && {
+
+# Prompt for domain
+echo ""
+read -rp "  Enter your domain name (e.g. example.com): " DOMAIN
+DOMAIN=$(echo "$DOMAIN" | xargs)  # trim whitespace
+
+if [ -z "$DOMAIN" ]; then
+    warn "No domain entered — Caddyfile will use placeholder YOUR_DOMAIN"
+    warn "You can replace it later: sudo sed -i 's/YOUR_DOMAIN/yourdomain.com/g' /etc/caddy/Caddyfile"
+    DOMAIN="YOUR_DOMAIN"
+fi
+
+log "Using domain: $DOMAIN"
 
 # Install Caddy if not present
 if ! command -v caddy &>/dev/null; then
@@ -588,22 +601,31 @@ if [ ! -f /etc/caddy/Caddyfile ] || ! grep -q "reverse_proxy" /etc/caddy/Caddyfi
     if [ -f "$SCRIPT_DIR/caddy/Caddyfile.example" ]; then
         cp "$SCRIPT_DIR/caddy/Caddyfile.example" /etc/caddy/Caddyfile
     else
-        cat > /etc/caddy/Caddyfile << 'CADDYEOF'
-# Replace YOUR_DOMAIN with your actual domain
+        cat > /etc/caddy/Caddyfile << CADDYEOF
+# Domain: $DOMAIN
 
 # Your projects
-# bloodhound.YOUR_DOMAIN {
-#     reverse_proxy localhost:3000
-# }
+bloodhound.$DOMAIN {
+    reverse_proxy localhost:3000
+}
+
+kaal.$DOMAIN {
+    reverse_proxy localhost:3001
+}
+
+tribute.$DOMAIN {
+    reverse_proxy localhost:3002
+}
 
 # AI sandbox entry point
-# ai.YOUR_DOMAIN {
-#     reverse_proxy localhost:4000
-# }
+ai.$DOMAIN {
+    reverse_proxy localhost:4000
+}
 CADDYEOF
     fi
-    log "Main Caddyfile created at /etc/caddy/Caddyfile"
-    warn "Edit /etc/caddy/Caddyfile to set your domain name!"
+    # Replace YOUR_DOMAIN with the actual domain (handles both template and inline)
+    sed -i "s/YOUR_DOMAIN/$DOMAIN/g" /etc/caddy/Caddyfile
+    log "Main Caddyfile created at /etc/caddy/Caddyfile (domain: $DOMAIN)"
 else
     log "Main Caddyfile already exists"
 fi
@@ -695,7 +717,7 @@ echo "  Unpatched exploits            Auto security updates"
 echo "  SUID abuse                    Audited + neutered"
 echo ""
 echo "  Caddy:"
-echo "  Main Caddyfile:  /etc/caddy/Caddyfile (edit to set your domain)"
+echo "  Main Caddyfile:  /etc/caddy/Caddyfile"
 echo "  AI Caddyfile:    /srv/$AI_USER/Caddyfile (AI controls this)"
 echo "  AI reloads via:  caddy reload --config /srv/$AI_USER/Caddyfile --address localhost:2020"
 echo ""
@@ -703,5 +725,4 @@ echo "  ⚠️  BEFORE YOU REBOOT:"
 echo "  1. Verify SSH key is in /home/$MAIN_USER/.ssh/authorized_keys"
 echo "  2. Test SSH in a NEW terminal"
 echo "  3. Then: sudo systemctl restart ssh"
-echo "  4. Edit /etc/caddy/Caddyfile to set your domain"
 echo ""
