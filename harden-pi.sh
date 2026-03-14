@@ -602,7 +602,12 @@ if [ ! -f /etc/caddy/Caddyfile ] || ! grep -q "reverse_proxy" /etc/caddy/Caddyfi
         cp "$SCRIPT_DIR/caddy/Caddyfile.example" /etc/caddy/Caddyfile
     else
         cat > /etc/caddy/Caddyfile << CADDYEOF
-# Domain: $DOMAIN
+# Main Caddyfile — owned by root, AI cannot modify this file
+# Each block maps a subdomain to a local port where your app runs.
+# Caddy automatically gets HTTPS certificates from Let's Encrypt.
+#
+# To add a project:   add a block, then: sudo systemctl reload caddy
+# To remove a project: delete its block, then reload
 
 # Your projects
 bloodhound.$DOMAIN {
@@ -617,7 +622,7 @@ tribute.$DOMAIN {
     reverse_proxy localhost:3002
 }
 
-# AI sandbox entry point
+# AI sandbox — forwards to AI's own Caddy on :4000
 ai.$DOMAIN {
     reverse_proxy localhost:4000
 }
@@ -639,6 +644,14 @@ if [ ! -f "/srv/$AI_USER/Caddyfile" ]; then
         cp "$SCRIPT_DIR/caddy/Caddyfile.ai.example" "/srv/$AI_USER/Caddyfile"
     else
         cat > "/srv/$AI_USER/Caddyfile" << 'AICADDYEOF'
+# AI Sandbox Caddyfile — you (the AI) control this file
+# Main Caddy forwards ai.yourdomain.com traffic here on port 4000.
+# No TLS needed — main Caddy handles HTTPS.
+#
+# To add a route:   add a handle_path block, then reload (no sudo needed):
+#   caddy reload --config /srv/AI_USER/Caddyfile --address localhost:2020
+# To remove a route: delete its block and reload.
+
 {
     admin localhost:2020
 }

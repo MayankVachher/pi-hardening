@@ -1,9 +1,28 @@
 # =============================================================================
-# Main Caddyfile — owned by root, AI cannot modify
-# Copy to /etc/caddy/Caddyfile and replace YOUR_DOMAIN
+# Main Caddyfile — owned by root, AI cannot modify this file
+# Location: /etc/caddy/Caddyfile
+#
+# How this works:
+#   Caddy automatically gets HTTPS certificates from Let's Encrypt.
+#   Each block below maps a subdomain to a local port where your app runs.
+#   For example: bloodhound.YOUR_DOMAIN → localhost:3000
+#
+# To add a new project:
+#   1. Add a block like:
+#        myapp.YOUR_DOMAIN {
+#            reverse_proxy localhost:PORT
+#        }
+#   2. Reload: sudo systemctl reload caddy
+#
+# To remove a project:
+#   Delete its block and reload Caddy.
+#
+# The AI sandbox block (ai.YOUR_DOMAIN) forwards all AI traffic to port 4000,
+# where the AI runs its own Caddy instance. The AI cannot modify THIS file —
+# it can only control routing within its own sandbox.
 # =============================================================================
 
-# Your projects — add/remove as needed
+# Your projects — each subdomain routes to the app's local port
 bloodhound.YOUR_DOMAIN {
     reverse_proxy localhost:3000
 }
@@ -16,7 +35,8 @@ tribute.YOUR_DOMAIN {
     reverse_proxy localhost:3002
 }
 
-# AI sandbox — single entry point to AI's own Caddy
+# AI sandbox — all traffic to ai.YOUR_DOMAIN goes to AI's own Caddy on :4000
+# The AI controls routing from there (see /srv/<ai-user>/Caddyfile)
 ai.YOUR_DOMAIN {
     reverse_proxy localhost:4000
 }
