@@ -34,6 +34,7 @@ confirm_step() {
     local already_done="${4:-}"
 
     echo ""
+    clear
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo -e "  ${BLUE}Step $step_num:${NC} $title"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

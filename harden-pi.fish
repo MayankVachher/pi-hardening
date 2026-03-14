@@ -44,6 +44,7 @@ function confirm_step
     end
 
     echo ""
+    clear
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo -e "  \033[0;34mStep $step_num:\033[0m $title"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
