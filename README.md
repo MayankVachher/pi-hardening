@@ -18,7 +18,7 @@ The script will ask for your username and the AI account name, then walk you thr
 
 ## What It Does
 
-The script runs 11 steps, each explained and requiring your confirmation:
+The script runs 10 steps, each explained and requiring your confirmation:
 
 | Step | What | Why |
 |------|-------|-----|
@@ -27,12 +27,11 @@ The script runs 11 steps, each explained and requiring your confirmation:
 | 3 | Block sudo access | AI can't become root, ever |
 | 4 | **Block LAN access** | **AI can't scan your home network** (router, NAS, etc.) |
 | 5 | Set resource limits | Prevents fork bombs, memory exhaustion, disk filling |
-| 6 | Audit SUID binaries | Removes common privilege escalation vectors |
-| 7 | Harden SSH | Key-only auth, no root login, AI blocked from SSH |
-| 8 | Install fail2ban | Auto-bans IPs after failed login attempts |
-| 9 | Auto security updates | Daily patches for kernel/system exploits |
-| 10 | Create project directories | Separated /srv dirs with ACL for read access |
-| 11 | Install & configure Caddy | Dual reverse proxy — you own routing, AI owns its sandbox |
+| 6 | Harden SSH | Key-only auth, no root login, AI blocked from SSH |
+| 7 | Install fail2ban | Auto-bans IPs after failed login attempts |
+| 8 | Auto security updates | Daily patches for kernel/system exploits |
+| 9 | Create project directories | Separated /srv dirs with ACL for read access |
+| 10 | Install & configure Caddy | Dual reverse proxy — you own routing, AI owns its sandbox |
 
 ## Features
 
@@ -148,7 +147,7 @@ The script is safe to re-run. Each step checks if it's already been applied:
 
 ## Important Notes
 
-- **Set up SSH key auth BEFORE running step 7** — it disables password login
+- **Set up SSH key auth BEFORE running step 6** — it disables password login
 - **Test SSH in a second terminal** before closing your current session
 - The script does **not** restart SSH automatically — you do that after verifying
 

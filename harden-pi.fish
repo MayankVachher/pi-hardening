@@ -301,48 +301,7 @@ end
 
 
 # =============================================================================
-# STEP 6: Audit and reduce SUID binaries
-# =============================================================================
-
-set STEP6_STATUS
-set SUID_LOG "/home/$MAIN_USER/suid-audit.txt"
-set SUID_CLEAN true
-for bin in /usr/bin/chsh /usr/bin/chfn /usr/bin/newgrp /usr/bin/mount /usr/bin/umount
-    if test -f "$bin" -a -u "$bin"
-        set SUID_CLEAN false
-        break
-    end
-end
-if test -f "$SUID_LOG" -a "$SUID_CLEAN" = "true"
-    set STEP6_STATUS "__DONE__:Audit file exists and target SUID binaries already cleaned."
-end
-
-if confirm_step 6 "Audit and reduce SUID binaries" \
-    "SUID binaries run as root no matter who calls them — a classic privilege" \
-    "escalation vector. This step:" \
-    "  1. Saves a full list of all SUID binaries to ~/suid-audit.txt" \
-    "  2. Removes the SUID bit from common ones that aren't needed:" \
-    "     chsh, chfn, newgrp, mount, umount" \
-    "You should review the audit file and remove SUID from anything else" \
-    "you don't need." \
-    $STEP6_STATUS
-
-    set SUID_LOG "/home/$MAIN_USER/suid-audit.txt"
-    find / -perm -4000 -type f 2>/dev/null > "$SUID_LOG"
-    chown "$MAIN_USER:$MAIN_USER" "$SUID_LOG"
-    log "SUID binary list saved to $SUID_LOG"
-
-    for bin in /usr/bin/chsh /usr/bin/chfn /usr/bin/newgrp /usr/bin/mount /usr/bin/umount
-        if test -f "$bin"
-            chmod u-s "$bin"
-            log "Removed SUID from $bin"
-        end
-    end
-end
-
-
-# =============================================================================
-# STEP 7: Harden SSH configuration
+# STEP 6: Harden SSH configuration
 # =============================================================================
 
 set STEP6_STATUS
@@ -357,7 +316,7 @@ if test -f "$SSHD_CONFIG"
     end
 end
 
-if confirm_step 7 "Harden SSH configuration" \
+if confirm_step 6 "Harden SSH configuration" \
     "SSH is the front door to your Pi. This step:" \
     "  • Disables password login → key-only, can't be brute forced" \
     "  • Disables root login → must SSH as your account, then sudo" \
@@ -397,7 +356,7 @@ end
 
 
 # =============================================================================
-# STEP 8: Install and configure fail2ban
+# STEP 7: Install and configure fail2ban
 # =============================================================================
 
 set STEP6_STATUS
@@ -405,7 +364,7 @@ if command -q fail2ban-client; and systemctl is-active --quiet fail2ban 2>/dev/n
     set STEP6_STATUS "__DONE__:fail2ban is installed and running."
 end
 
-if confirm_step 8 "Install and configure fail2ban" \
+if confirm_step 7 "Install and configure fail2ban" \
     "Watches SSH auth logs and automatically bans IPs that fail login" \
     "repeatedly. After 3 failed attempts within 10 minutes, the IP is" \
     "banned for 1 hour. This stops brute-force attacks and port scanners." \
@@ -433,7 +392,7 @@ end
 
 
 # =============================================================================
-# STEP 9: Enable automatic security updates
+# STEP 8: Enable automatic security updates
 # =============================================================================
 
 set STEP6_STATUS
@@ -441,7 +400,7 @@ if test -f /etc/apt/apt.conf.d/50unattended-upgrades -a -f /etc/apt/apt.conf.d/2
     set STEP6_STATUS "__DONE__:Unattended-upgrades config files already exist."
 end
 
-if confirm_step 9 "Enable automatic security updates" \
+if confirm_step 8 "Enable automatic security updates" \
     "Kernel and system exploits are discovered regularly. If an attacker" \
     "compromises the AI agent and finds an unpatched local privilege" \
     "escalation — game over. This enables daily automatic security patches" \
@@ -468,7 +427,7 @@ end
 
 
 # =============================================================================
-# STEP 10: Create separated project directories
+# STEP 9: Create separated project directories
 # =============================================================================
 
 set STEP6_STATUS
@@ -483,7 +442,7 @@ if test -d "/srv/$MAIN_USER" -a -d "/srv/$AI_USER"
     end
 end
 
-if confirm_step 10 "Create separated project directories" \
+if confirm_step 9 "Create separated project directories" \
     "Creates two isolated directories:" \
     "  • /srv/$MAIN_USER → YOUR projects (mode 700, only you can access)" \
     "  • /srv/$AI_USER   → AI's playground (mode 700, only it can access)" \
@@ -518,22 +477,22 @@ end
 
 
 # =============================================================================
-# STEP 11: Install and configure Caddy (reverse proxy)
+# STEP 10: Install and configure Caddy (reverse proxy)
 # =============================================================================
 
-set STEP11_DONE ""
+set STEP10_DONE ""
 if command -v caddy &>/dev/null; and test -f /etc/caddy/Caddyfile; and test -f /srv/$AI_USER/Caddyfile
-    set STEP11_DONE "Caddy is installed, main Caddyfile and AI Caddyfile both exist."
+    set STEP10_DONE "Caddy is installed, main Caddyfile and AI Caddyfile both exist."
 end
 
-if confirm_step 11 "Install and configure Caddy" \
+if confirm_step 10 "Install and configure Caddy" \
 "Sets up Caddy as a reverse proxy with two instances:
   • Main Caddy (root, :443) — handles HTTPS, routes to your apps + AI
   • AI Caddy ($AI_USER, :4000) — AI controls its own routing
 The AI can reload its own Caddy via admin API (no sudo needed).
 Main Caddyfile is owned by root — AI cannot modify it.
 You'll be prompted for your domain name (e.g. example.com)." \
-"$STEP11_DONE"
+"$STEP10_DONE"
 
     # Prompt for domain
     echo ""
@@ -687,7 +646,6 @@ echo "  Network pivot to LAN          iptables UID-based drops"
 echo "  Resource exhaustion           ulimits (processes, memory, files)"
 echo "  SSH brute force               Key-only + fail2ban"
 echo "  Unpatched exploits            Auto security updates"
-echo "  SUID abuse                    Audited + neutered"
 echo ""
 echo "  Caddy:"
 echo "  Main Caddyfile:  /etc/caddy/Caddyfile"
