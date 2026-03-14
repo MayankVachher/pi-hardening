@@ -57,13 +57,15 @@ function confirm_step
             info "$line"
         end
         echo ""
-        read -P "  Re-apply anyway? (y/n/q to quit) " REPLY
+        read -P "  Re-apply anyway? (y/n/q to quit) " --nchars 1 REPLY
+        echo ""
     else
         for line in $explanation
             info "$line"
         end
         echo ""
-        read -P "  Proceed with this step? (y/n/q to quit) " REPLY
+        read -P "  Proceed with this step? (y/n/q to quit) " --nchars 1 REPLY
+        echo ""
     end
 
     if string match -qi 'q' "$REPLY"
@@ -122,7 +124,8 @@ echo ""
 echo "  Your account:      $MAIN_USER"
 echo "  AI agent account:  $AI_USER"
 echo ""
-read -P "  Start hardening? (y/n) " CONFIRM
+read -P "  Start hardening? (y/n) " --nchars 1 CONFIRM
+echo ""
 if not string match -qi 'y' "$CONFIRM"
     exit 1
 end
