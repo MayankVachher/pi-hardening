@@ -469,17 +469,21 @@ chown "$AI_USER:$AI_USER" "/srv/$AI_USER"
 chmod 700 "/srv/$AI_USER"
 log "/srv/$AI_USER → AI's space (full freedom)"
 
-# Give your account read access to AI's directory via ACL
+# Give your account read access to AI's directories via ACL
 # This does NOT give the AI access to your directory
 if command -v setfacl &>/dev/null; then
     setfacl -R -m u:"$MAIN_USER":rX "/srv/$AI_USER"
     setfacl -R -d -m u:"$MAIN_USER":rX "/srv/$AI_USER"
-    log "ACL: $MAIN_USER can read /srv/$AI_USER (AI cannot read yours)"
+    setfacl -R -m u:"$MAIN_USER":rX "/home/$AI_USER"
+    setfacl -R -d -m u:"$MAIN_USER":rX "/home/$AI_USER"
+    log "ACL: $MAIN_USER can read /srv/$AI_USER and /home/$AI_USER"
 else
     apt-get install -y -qq acl
     setfacl -R -m u:"$MAIN_USER":rX "/srv/$AI_USER"
     setfacl -R -d -m u:"$MAIN_USER":rX "/srv/$AI_USER"
-    log "Installed acl package and set read ACL for $MAIN_USER on /srv/$AI_USER"
+    setfacl -R -m u:"$MAIN_USER":rX "/home/$AI_USER"
+    setfacl -R -d -m u:"$MAIN_USER":rX "/home/$AI_USER"
+    log "Installed acl package and set read ACL for $MAIN_USER on /srv/$AI_USER and /home/$AI_USER"
 fi
 
 }
