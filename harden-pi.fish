@@ -301,46 +301,10 @@ end
 
 
 # =============================================================================
-# STEP 6: Make critical system files immutable
+# STEP 6: Audit and reduce SUID binaries
 # =============================================================================
 
 set STEP6_STATUS
-set IMMUTABLE_COUNT 0
-for f in /etc/passwd /etc/shadow /etc/sudoers /etc/group
-    if test -f "$f"; and lsattr "$f" 2>/dev/null | grep -q '^\s*....i'
-        set IMMUTABLE_COUNT (math $IMMUTABLE_COUNT + 1)
-    end
-end
-if test "$IMMUTABLE_COUNT" -eq 4
-    set STEP6_STATUS "__DONE__:All 4 critical files already have the immutable flag set."
-end
-
-if confirm_step 6 "Make critical system files immutable" \
-    "Sets the immutable flag (chattr +i) on:" \
-    "  • /etc/passwd   — Linux accounts" \
-    "  • /etc/shadow   — password hashes" \
-    "  • /etc/sudoers  — sudo permissions" \
-    "  • /etc/group    — group memberships" \
-    "This prevents ANYONE — even root — from modifying these files without" \
-    "first removing the flag. Stops an attacker from adding a rogue account." \
-    "⚠️  To edit later: sudo chattr -i <file>, make changes, sudo chattr +i <file>" \
-    $STEP6_STATUS
-
-    for f in /etc/passwd /etc/shadow /etc/sudoers /etc/group
-        if test -f "$f"
-            chattr -i "$f" 2>/dev/null; or true
-            chattr +i "$f"
-            log "Made $f immutable"
-        end
-    end
-end
-
-
-# =============================================================================
-# STEP 7: Audit and reduce SUID binaries
-# =============================================================================
-
-set STEP7_STATUS
 set SUID_LOG "/home/$MAIN_USER/suid-audit.txt"
 set SUID_CLEAN true
 for bin in /usr/bin/chsh /usr/bin/chfn /usr/bin/newgrp /usr/bin/mount /usr/bin/umount
@@ -350,10 +314,10 @@ for bin in /usr/bin/chsh /usr/bin/chfn /usr/bin/newgrp /usr/bin/mount /usr/bin/u
     end
 end
 if test -f "$SUID_LOG" -a "$SUID_CLEAN" = "true"
-    set STEP7_STATUS "__DONE__:Audit file exists and target SUID binaries already cleaned."
+    set STEP6_STATUS "__DONE__:Audit file exists and target SUID binaries already cleaned."
 end
 
-if confirm_step 7 "Audit and reduce SUID binaries" \
+if confirm_step 6 "Audit and reduce SUID binaries" \
     "SUID binaries run as root no matter who calls them — a classic privilege" \
     "escalation vector. This step:" \
     "  1. Saves a full list of all SUID binaries to ~/suid-audit.txt" \
@@ -361,7 +325,7 @@ if confirm_step 7 "Audit and reduce SUID binaries" \
     "     chsh, chfn, newgrp, mount, umount" \
     "You should review the audit file and remove SUID from anything else" \
     "you don't need." \
-    $STEP7_STATUS
+    $STEP6_STATUS
 
     set SUID_LOG "/home/$MAIN_USER/suid-audit.txt"
     find / -perm -4000 -type f 2>/dev/null > "$SUID_LOG"
@@ -378,10 +342,10 @@ end
 
 
 # =============================================================================
-# STEP 8: Harden SSH configuration
+# STEP 7: Harden SSH configuration
 # =============================================================================
 
-set STEP8_STATUS
+set STEP6_STATUS
 set SSHD_CONFIG /etc/ssh/sshd_config
 if test -f "$SSHD_CONFIG"
     set SSH_HARDENED true
@@ -389,11 +353,11 @@ if test -f "$SSHD_CONFIG"
     grep -q "^PasswordAuthentication no" "$SSHD_CONFIG"; or set SSH_HARDENED false
     grep -q "DenyUsers.*$AI_USER" "$SSHD_CONFIG"; or set SSH_HARDENED false
     if test "$SSH_HARDENED" = "true"
-        set STEP8_STATUS "__DONE__:sshd_config already has root login disabled, password auth off, and $AI_USER denied."
+        set STEP6_STATUS "__DONE__:sshd_config already has root login disabled, password auth off, and $AI_USER denied."
     end
 end
 
-if confirm_step 8 "Harden SSH configuration" \
+if confirm_step 7 "Harden SSH configuration" \
     "SSH is the front door to your Pi. This step:" \
     "  • Disables password login → key-only, can't be brute forced" \
     "  • Disables root login → must SSH as your account, then sudo" \
@@ -403,7 +367,7 @@ if confirm_step 8 "Harden SSH configuration" \
     "⚠️  IMPORTANT: Make sure you have SSH key access set up BEFORE" \
     "restarting SSH! The script backs up sshd_config but does NOT" \
     "restart SSH — you do that manually after verifying." \
-    $STEP8_STATUS
+    $STEP6_STATUS
 
     set SSHD_CONFIG /etc/ssh/sshd_config
     cp "$SSHD_CONFIG" "$SSHD_CONFIG.bak."(date +%s)
@@ -433,20 +397,20 @@ end
 
 
 # =============================================================================
-# STEP 9: Install and configure fail2ban
+# STEP 8: Install and configure fail2ban
 # =============================================================================
 
-set STEP9_STATUS
+set STEP6_STATUS
 if command -q fail2ban-client; and systemctl is-active --quiet fail2ban 2>/dev/null
-    set STEP9_STATUS "__DONE__:fail2ban is installed and running."
+    set STEP6_STATUS "__DONE__:fail2ban is installed and running."
 end
 
-if confirm_step 9 "Install and configure fail2ban" \
+if confirm_step 8 "Install and configure fail2ban" \
     "Watches SSH auth logs and automatically bans IPs that fail login" \
     "repeatedly. After 3 failed attempts within 10 minutes, the IP is" \
     "banned for 1 hour. This stops brute-force attacks and port scanners." \
     "Installs the fail2ban package if not already present." \
-    $STEP9_STATUS
+    $STEP6_STATUS
 
     if not command -q fail2ban-client
         apt-get update -qq
@@ -469,21 +433,21 @@ end
 
 
 # =============================================================================
-# STEP 10: Enable automatic security updates
+# STEP 9: Enable automatic security updates
 # =============================================================================
 
-set STEP10_STATUS
+set STEP6_STATUS
 if test -f /etc/apt/apt.conf.d/50unattended-upgrades -a -f /etc/apt/apt.conf.d/20auto-upgrades
-    set STEP10_STATUS "__DONE__:Unattended-upgrades config files already exist."
+    set STEP6_STATUS "__DONE__:Unattended-upgrades config files already exist."
 end
 
-if confirm_step 10 "Enable automatic security updates" \
+if confirm_step 9 "Enable automatic security updates" \
     "Kernel and system exploits are discovered regularly. If an attacker" \
     "compromises the AI agent and finds an unpatched local privilege" \
     "escalation — game over. This enables daily automatic security patches" \
     "from Debian/Raspbian repos. NO auto-reboot — you control when to" \
     "reboot. Installs unattended-upgrades if not present." \
-    $STEP10_STATUS
+    $STEP6_STATUS
 
     apt-get install -y -qq unattended-upgrades
 
@@ -504,10 +468,10 @@ end
 
 
 # =============================================================================
-# STEP 11: Create separated project directories
+# STEP 10: Create separated project directories
 # =============================================================================
 
-set STEP11_STATUS
+set STEP6_STATUS
 if test -d "/srv/$MAIN_USER" -a -d "/srv/$AI_USER"
     set OWNER_MAIN (stat -c '%U' "/srv/$MAIN_USER" 2>/dev/null)
     set OWNER_AI (stat -c '%U' "/srv/$AI_USER" 2>/dev/null)
@@ -515,18 +479,18 @@ if test -d "/srv/$MAIN_USER" -a -d "/srv/$AI_USER"
     set PERMS_AI (stat -c '%a' "/srv/$AI_USER" 2>/dev/null)
     if test "$OWNER_MAIN" = "$MAIN_USER" -a "$OWNER_AI" = "$AI_USER" \
         -a "$PERMS_MAIN" = "700" -a "$PERMS_AI" = "700"
-        set STEP11_STATUS "__DONE__:/srv/$MAIN_USER (owned by $MAIN_USER, 700) and /srv/$AI_USER (owned by $AI_USER, 700) already exist."
+        set STEP6_STATUS "__DONE__:/srv/$MAIN_USER (owned by $MAIN_USER, 700) and /srv/$AI_USER (owned by $AI_USER, 700) already exist."
     end
 end
 
-if confirm_step 11 "Create separated project directories" \
+if confirm_step 10 "Create separated project directories" \
     "Creates two isolated directories:" \
     "  • /srv/$MAIN_USER → YOUR projects (mode 700, only you can access)" \
     "  • /srv/$AI_USER   → AI's playground (mode 700, only it can access)" \
     "Neither account can read, write, or even list the other's directory." \
     "Also sets up an ACL so you can read the AI's directory without sudo" \
     "(the AI still cannot read yours)." \
-    $STEP11_STATUS
+    $STEP6_STATUS
 
     mkdir -p "/srv/$MAIN_USER"
     chown "$MAIN_USER:$MAIN_USER" "/srv/$MAIN_USER"
@@ -554,22 +518,22 @@ end
 
 
 # =============================================================================
-# STEP 12: Install and configure Caddy (reverse proxy)
+# STEP 11: Install and configure Caddy (reverse proxy)
 # =============================================================================
 
-set STEP12_DONE ""
+set STEP11_DONE ""
 if command -v caddy &>/dev/null; and test -f /etc/caddy/Caddyfile; and test -f /srv/$AI_USER/Caddyfile
-    set STEP12_DONE "Caddy is installed, main Caddyfile and AI Caddyfile both exist."
+    set STEP11_DONE "Caddy is installed, main Caddyfile and AI Caddyfile both exist."
 end
 
-if confirm_step 12 "Install and configure Caddy" \
+if confirm_step 11 "Install and configure Caddy" \
 "Sets up Caddy as a reverse proxy with two instances:
   • Main Caddy (root, :443) — handles HTTPS, routes to your apps + AI
   • AI Caddy ($AI_USER, :4000) — AI controls its own routing
 The AI can reload its own Caddy via admin API (no sudo needed).
 Main Caddyfile is owned by root — AI cannot modify it.
 You'll be prompted for your domain name (e.g. example.com)." \
-"$STEP12_DONE"
+"$STEP11_DONE"
 
     # Prompt for domain
     echo ""
@@ -717,7 +681,7 @@ echo "  AI agent account:  $AI_USER"
 echo ""
 echo "  Protected against:            How:"
 echo "  ─────────────────────────────────────────────"
-echo "  Privilege escalation          No sudo + immutable system files"
+echo "  Privilege escalation          No sudo access"
 echo "  Credential theft              Home dir locked (700)"
 echo "  Network pivot to LAN          iptables UID-based drops"
 echo "  Resource exhaustion           ulimits (processes, memory, files)"
