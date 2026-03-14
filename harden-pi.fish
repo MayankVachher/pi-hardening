@@ -138,10 +138,10 @@ if id "$AI_USER" &>/dev/null
 end
 
 if confirm_step 1 "Create AI agent user" \
-    "Creates a new Linux user named '$AI_USER' with its own home directory." \
+    "Creates a sandboxed Linux account called '$AI_USER' with its own home directory." \
     "This is the foundation of isolation — every permission and restriction" \
-    "we set up later builds on this user boundary. The user gets a bash shell" \
-    "so it can run commands, but will have no sudo access." \
+    "we set up later builds on this account boundary. The AI agent gets a bash" \
+    "shell so it can run commands, but will have no sudo access." \
     $STEP1_STATUS
 
     if id "$AI_USER" &>/dev/null
