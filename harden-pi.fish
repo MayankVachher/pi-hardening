@@ -57,14 +57,14 @@ function confirm_step
             info "$line"
         end
         echo ""
-        read -P "  Re-apply anyway? (y/n/q to quit) " --nchars 1 REPLY
+        read -P "  Re-apply anyway? (Y/n/q to quit) " --nchars 1 REPLY
         echo ""
     else
         for line in $explanation
             info "$line"
         end
         echo ""
-        read -P "  Proceed with this step? (y/n/q to quit) " --nchars 1 REPLY
+        read -P "  Proceed with this step? (Y/n/q to quit) " --nchars 1 REPLY
         echo ""
     end
 
@@ -72,7 +72,7 @@ function confirm_step
         warn "Aborted by user at step $step_num."
         exit 0
     end
-    if not string match -qi 'y' "$REPLY"
+    if string match -qi 'n' "$REPLY"
         warn "Skipped step $step_num: $title"
         return 1
     end
@@ -124,9 +124,9 @@ echo ""
 echo "  Your account:      $MAIN_USER"
 echo "  AI agent account:  $AI_USER"
 echo ""
-read -P "  Start hardening? (y/n) " --nchars 1 CONFIRM
+read -P "  Start hardening? (Y/n) " --nchars 1 CONFIRM
 echo ""
-if not string match -qi 'y' "$CONFIRM"
+if string match -qi 'n' "$CONFIRM"
     exit 1
 end
 

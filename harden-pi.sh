@@ -49,13 +49,13 @@ confirm_step() {
             info "$line"
         done <<< "$explanation"
         echo ""
-        read -p "  Re-apply anyway? (y/n/q to quit) " -n 1 -r
+        read -p "  Re-apply anyway? (Y/n/q to quit) " -n 1 -r
     else
         while IFS= read -r line; do
             info "$line"
         done <<< "$explanation"
         echo ""
-        read -p "  Proceed with this step? (y/n/q to quit) " -n 1 -r
+        read -p "  Proceed with this step? (Y/n/q to quit) " -n 1 -r
     fi
 
     echo ""
@@ -63,7 +63,7 @@ confirm_step() {
         warn "Aborted by user at step $step_num."
         exit 0
     fi
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    if [[ $REPLY =~ ^[Nn]$ ]]; then
         warn "Skipped step $step_num: $title"
         return 1
     fi
@@ -115,9 +115,9 @@ echo ""
 echo "  Your account:      $MAIN_USER"
 echo "  AI agent account:  $AI_USER"
 echo ""
-read -p "  Start hardening? (y/n) " -n 1 -r
+read -p "  Start hardening? (Y/n) " -n 1 -r
 echo ""
-[[ $REPLY =~ ^[Yy]$ ]] || exit 1
+[[ $REPLY =~ ^[Nn]$ ]] && exit 1
 
 
 # =============================================================================
