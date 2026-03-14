@@ -534,7 +534,9 @@ confirm_step 11 "Create separated project directories" \
 "Creates two isolated directories:
   • /srv/$MAIN_USER  → YOUR projects (mode 700, only you can access)
   • /srv/$AI_USER    → AI's playground (mode 700, only it can access)
-Neither account can read, write, or even list the other's directory." \
+Neither account can read, write, or even list the other's directory.
+Also sets up an ACL so you can read the AI's directory without sudo
+(the AI still cannot read yours)." \
 "$STEP11_DONE" && {
 
 mkdir -p "/srv/$MAIN_USER"
@@ -546,6 +548,19 @@ mkdir -p "/srv/$AI_USER"
 chown "$AI_USER:$AI_USER" "/srv/$AI_USER"
 chmod 700 "/srv/$AI_USER"
 log "/srv/$AI_USER → AI's space (full freedom)"
+
+# Give your account read access to AI's directory via ACL
+# This does NOT give the AI access to your directory
+if command -v setfacl &>/dev/null; then
+    setfacl -R -m u:"$MAIN_USER":rX "/srv/$AI_USER"
+    setfacl -R -d -m u:"$MAIN_USER":rX "/srv/$AI_USER"
+    log "ACL: $MAIN_USER can read /srv/$AI_USER (AI cannot read yours)"
+else
+    apt-get install -y -qq acl
+    setfacl -R -m u:"$MAIN_USER":rX "/srv/$AI_USER"
+    setfacl -R -d -m u:"$MAIN_USER":rX "/srv/$AI_USER"
+    log "Installed acl package and set read ACL for $MAIN_USER on /srv/$AI_USER"
+fi
 
 }
 
