@@ -554,7 +554,7 @@ You'll be prompted for your domain name (e.g. example.com)." \
 
     # Prompt for domain
     echo ""
-    read -P "  Enter your domain name (e.g. example.com, blank to skip): " DOMAIN
+    read -P "  Enter your domain name (e.g. example.com, leave blank to set later): " DOMAIN
     set DOMAIN (string trim $DOMAIN)
 
     if test -z "$DOMAIN"

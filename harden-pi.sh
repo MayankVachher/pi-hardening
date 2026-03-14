@@ -570,7 +570,7 @@ You'll be prompted for your domain name (e.g. example.com)." \
 
 # Prompt for domain
 echo ""
-read -rp "  Enter your domain name (e.g. example.com, blank to skip): " DOMAIN
+read -rp "  Enter your domain name (e.g. example.com, leave blank to set later): " DOMAIN
 DOMAIN=$(echo "$DOMAIN" | xargs)  # trim whitespace
 
 if [ -z "$DOMAIN" ]; then
