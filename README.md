@@ -18,20 +18,21 @@ The script will ask for your username and the AI account name, then walk you thr
 
 ## What It Does
 
-The script runs 10 steps, each explained and requiring your confirmation:
+The script runs 11 steps, each explained and requiring your confirmation:
 
 | Step | What | Why |
 |------|-------|-----|
 | 1 | Create AI agent account | Isolation foundation — separate Linux account |
 | 2 | Lock down your home directory | AI can't read your SSH keys, tokens, .env files |
 | 3 | Block sudo access | AI can't become root, ever |
-| 4 | **Block LAN access** | **AI can't scan your home network** (router, NAS, etc.) |
+| 4 | **Block LAN access** | **AI can't scan your home network** over IPv4 or IPv6 (router, NAS, etc.) |
 | 5 | Set resource limits | Prevents fork bombs, memory exhaustion, disk filling |
 | 6 | Harden SSH | Key-only auth, no root login, AI blocked from SSH |
 | 7 | Install fail2ban | Auto-bans IPs after failed login attempts |
 | 8 | Auto security updates | Daily patches for kernel/system exploits |
 | 9 | Create project directories | Separated /srv dirs with ACL for read access |
 | 10 | Install & configure Caddy | Dual reverse proxy — you own routing, AI owns its sandbox |
+| 11 | Disable Wi-Fi power save | Pi stays reachable — power save silently drops it off the network |
 
 ## Features
 
@@ -54,7 +55,7 @@ This script is designed for a specific scenario:
 |--------|------------|
 | AI escalates to root | No sudo access |
 | AI steals your SSH keys / tokens | Home directory locked (mode 700) |
-| AI scans your home network | iptables blocks all LAN traffic per UID |
+| AI scans your home network | iptables + ip6tables block all LAN traffic per UID (IPv4 and IPv6) |
 | AI fork-bombs or OOMs the Pi | ulimits on processes, memory, file size |
 | AI brute-forces SSH | Key-only auth + fail2ban |
 | Kernel exploit gives AI root | Automatic security updates patch daily |

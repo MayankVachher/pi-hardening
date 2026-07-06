@@ -239,6 +239,9 @@ if confirm_step 4 "Block AI agent from LAN access" \
     "  • 10.0.0.0/8      (some networks)" \
     "  • 172.16.0.0/12   (other private range)" \
     "  • 169.254.0.0/16  (link-local / mDNS)" \
+    "Matching ip6tables rules block the IPv6 LAN too:" \
+    "  • fc00::/7        (unique local addresses)" \
+    "  • fe80::/10       (link-local)" \
     "The AI can still reach the internet (for APIs) but cannot touch" \
     "anything on your LAN. Rules are persisted across reboots." \
     $STEP4_STATUS
@@ -254,7 +257,21 @@ if confirm_step 4 "Block AI agent from LAN access" \
     iptables -A OUTPUT -m owner --uid-owner "$AI_UID" -d 172.16.0.0/12 -j DROP
     iptables -A OUTPUT -m owner --uid-owner "$AI_UID" -d 169.254.0.0/16 -j DROP
 
-    log "Blocked $AI_USER (UID $AI_UID) from all LAN traffic"
+    log "Blocked $AI_USER (UID $AI_UID) from all LAN traffic (IPv4)"
+
+    # Same treatment for IPv6 — otherwise the AI could pivot to LAN peers
+    # over IPv6 (ULA + link-local) even with the IPv4 rules in place.
+    if command -q ip6tables
+        for rule in (ip6tables -S OUTPUT 2>/dev/null | grep "owner --uid-owner $AI_UID")
+            eval ip6tables (echo "$rule" | sed 's/-A/-D/')
+        end 2>/dev/null; or true
+
+        ip6tables -A OUTPUT -m owner --uid-owner "$AI_UID" -d fc00::/7 -j DROP
+        ip6tables -A OUTPUT -m owner --uid-owner "$AI_UID" -d fe80::/10 -j DROP
+        log "Blocked $AI_USER (UID $AI_UID) from LAN traffic (IPv6: fc00::/7, fe80::/10)"
+    else
+        warn "ip6tables not found — IPv6 LAN not blocked (fine if IPv6 is disabled)"
+    end
 
     if command -q netfilter-persistent
         netfilter-persistent save
@@ -359,9 +376,9 @@ end
 # STEP 7: Install and configure fail2ban
 # =============================================================================
 
-set STEP6_STATUS
+set STEP7_STATUS
 if command -q fail2ban-client; and systemctl is-active --quiet fail2ban 2>/dev/null
-    set STEP6_STATUS "__DONE__:fail2ban is installed and running."
+    set STEP7_STATUS "__DONE__:fail2ban is installed and running."
 end
 
 if confirm_step 7 "Install and configure fail2ban" \
@@ -369,7 +386,7 @@ if confirm_step 7 "Install and configure fail2ban" \
     "repeatedly. After 3 failed attempts within 10 minutes, the IP is" \
     "banned for 1 hour. This stops brute-force attacks and port scanners." \
     "Installs the fail2ban package if not already present." \
-    $STEP6_STATUS
+    $STEP7_STATUS
 
     if not command -q fail2ban-client
         apt-get update -qq
@@ -395,9 +412,9 @@ end
 # STEP 8: Enable automatic security updates
 # =============================================================================
 
-set STEP6_STATUS
+set STEP8_STATUS
 if test -f /etc/apt/apt.conf.d/50unattended-upgrades -a -f /etc/apt/apt.conf.d/20auto-upgrades
-    set STEP6_STATUS "__DONE__:Unattended-upgrades config files already exist."
+    set STEP8_STATUS "__DONE__:Unattended-upgrades config files already exist."
 end
 
 if confirm_step 8 "Enable automatic security updates" \
@@ -406,7 +423,7 @@ if confirm_step 8 "Enable automatic security updates" \
     "escalation — game over. This enables daily automatic security patches" \
     "from Debian/Raspbian repos. NO auto-reboot — you control when to" \
     "reboot. Installs unattended-upgrades if not present." \
-    $STEP6_STATUS
+    $STEP8_STATUS
 
     apt-get install -y -qq unattended-upgrades
 
@@ -430,7 +447,7 @@ end
 # STEP 9: Create separated project directories
 # =============================================================================
 
-set STEP6_STATUS
+set STEP9_STATUS
 if test -d "/srv/$MAIN_USER" -a -d "/srv/$AI_USER"
     set OWNER_MAIN (stat -c '%U' "/srv/$MAIN_USER" 2>/dev/null)
     set OWNER_AI (stat -c '%U' "/srv/$AI_USER" 2>/dev/null)
@@ -438,7 +455,7 @@ if test -d "/srv/$MAIN_USER" -a -d "/srv/$AI_USER"
     set PERMS_AI (stat -c '%a' "/srv/$AI_USER" 2>/dev/null)
     if test "$OWNER_MAIN" = "$MAIN_USER" -a "$OWNER_AI" = "$AI_USER" \
         -a "$PERMS_MAIN" = "700" -a "$PERMS_AI" = "700"
-        set STEP6_STATUS "__DONE__:/srv/$MAIN_USER (owned by $MAIN_USER, 700) and /srv/$AI_USER (owned by $AI_USER, 700) already exist."
+        set STEP9_STATUS "__DONE__:/srv/$MAIN_USER (owned by $MAIN_USER, 700) and /srv/$AI_USER (owned by $AI_USER, 700) already exist."
     end
 end
 
@@ -449,7 +466,7 @@ if confirm_step 9 "Create separated project directories" \
     "Neither account can read, write, or even list the other's directory." \
     "Also sets up an ACL so you can read the AI's directory without sudo" \
     "(the AI still cannot read yours)." \
-    $STEP6_STATUS
+    $STEP9_STATUS
 
     mkdir -p "/srv/$MAIN_USER"
     chown "$MAIN_USER:$MAIN_USER" "/srv/$MAIN_USER"
@@ -631,6 +648,38 @@ end
 
 
 # =============================================================================
+# STEP 11: Disable Wi-Fi power save
+# =============================================================================
+
+set NM_CONF /etc/NetworkManager/conf.d/wifi-powersave.conf
+set STEP11_STATUS
+if test -f $NM_CONF; and grep -q "wifi.powersave = 2" $NM_CONF
+    set STEP11_STATUS "__DONE__:$NM_CONF already disables Wi-Fi power save."
+end
+
+if confirm_step 11 "Disable Wi-Fi power save" \
+    "The Pi's Broadcom Wi-Fi chip aggressively power-saves and can silently" \
+    "drop off the network after long uptimes — the Pi keeps running but is" \
+    "unreachable until power-cycled. This writes a NetworkManager config to" \
+    "keep Wi-Fi awake. If you're connected over Wi-Fi right now, the" \
+    "NetworkManager restart drops the connection for a few seconds." \
+    "Skip if the Pi is ethernet-only." \
+    $STEP11_STATUS
+
+    mkdir -p /etc/NetworkManager/conf.d
+    echo '[connection]
+wifi.powersave = 2' > $NM_CONF
+
+    if systemctl is-active --quiet NetworkManager
+        systemctl restart NetworkManager
+        log "Wi-Fi power save disabled (NetworkManager restarted)"
+    else
+        log "Config written — applies when NetworkManager starts"
+    end
+end
+
+
+# =============================================================================
 # DONE
 # =============================================================================
 
@@ -650,6 +699,7 @@ echo "  Network pivot to LAN          iptables UID-based drops"
 echo "  Resource exhaustion           ulimits (processes, memory, files)"
 echo "  SSH brute force               Key-only + fail2ban"
 echo "  Unpatched exploits            Auto security updates"
+echo "  Silent Wi-Fi dropouts         NetworkManager power save off"
 echo ""
 echo "  Caddy:"
 echo "  Main Caddyfile:  /etc/caddy/Caddyfile"
