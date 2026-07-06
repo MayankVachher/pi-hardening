@@ -6,7 +6,8 @@
 #       but CANNOT escalate privileges, steal credentials, or
 #       pivot to your home network.
 #
-# Run as: sudo bash harden-pi.sh
+# Run as:    sudo bash harden-pi.sh
+# Verify as: sudo bash harden-pi.sh verify   (proves the walls hold, run AS the AI user)
 # Tested on: Raspberry Pi OS (Debian-based)
 # =============================================================================
 
@@ -71,15 +72,223 @@ confirm_step() {
     return 0
 }
 
+# =============================================================================
+# VERIFY MODE — self-test that runs the attacks AS the AI user and proves
+# each wall holds. Safe to run any time: sudo bash harden-pi.sh verify
+# =============================================================================
+
+V_PASS=0
+V_FAIL=0
+v_pass() { echo -e "  ${GREEN}[PASS]${NC} $1"; V_PASS=$((V_PASS + 1)); }
+v_fail() { echo -e "  ${RED}[FAIL]${NC} $1"; V_FAIL=$((V_FAIL + 1)); }
+v_skip() { echo -e "  ${YELLOW}[SKIP]${NC} $1"; }
+
+run_verify() {
+    # Run commands as the AI user
+    as_ai() { runuser -u "$AI_USER" -- "$@"; }
+
+    echo ""
+    echo "  Verifying hardening — attacks below run AS '$AI_USER'"
+    echo "  ─────────────────────────────────────────────────────"
+    echo ""
+
+    if ! id "$AI_USER" &>/dev/null; then
+        v_fail "User '$AI_USER' does not exist — run the hardening script first"
+        exit 1
+    fi
+    AI_UID=$(id -u "$AI_USER")
+
+    # --- Privilege escalation ---
+    if as_ai sudo -n true &>/dev/null; then
+        v_fail "AI can run sudo — privilege escalation possible!"
+    else
+        v_pass "sudo blocked for $AI_USER"
+    fi
+
+    # --- Credential theft ---
+    if as_ai ls "/home/$MAIN_USER" &>/dev/null; then
+        v_fail "AI can list /home/$MAIN_USER — your files are exposed!"
+    else
+        v_pass "/home/$MAIN_USER unreadable by AI"
+    fi
+
+    if [ -d "/srv/$MAIN_USER" ]; then
+        if as_ai ls "/srv/$MAIN_USER" &>/dev/null; then
+            v_fail "AI can list /srv/$MAIN_USER — your projects are exposed!"
+        else
+            v_pass "/srv/$MAIN_USER unreadable by AI"
+        fi
+    else
+        v_skip "/srv/$MAIN_USER does not exist (step 9 not run)"
+    fi
+
+    # --- Network pivot ---
+    GW=$(ip route show default 2>/dev/null | awk '{print $3; exit}')
+    if [ -n "$GW" ]; then
+        if as_ai ping -c 1 -W 2 "$GW" &>/dev/null; then
+            v_fail "AI can reach the gateway ($GW) — LAN is NOT blocked!"
+        else
+            v_pass "LAN blocked (gateway $GW unreachable as $AI_USER)"
+        fi
+    else
+        v_skip "No default gateway found — cannot test LAN block"
+    fi
+
+    # --- DNS still works (the LAN block must not break it) ---
+    if as_ai getent hosts example.com &>/dev/null; then
+        v_pass "DNS resolution works for AI"
+    else
+        v_fail "DNS is broken for AI — LAN block may be dropping resolver traffic"
+    fi
+
+    # --- Internet still works ---
+    if command -v curl &>/dev/null; then
+        if as_ai timeout 10 curl -sI https://example.com &>/dev/null; then
+            v_pass "Internet (HTTPS) works for AI"
+        else
+            v_fail "AI cannot reach the internet — API calls will fail"
+        fi
+    else
+        v_skip "curl not installed — cannot test internet access"
+    fi
+
+    # --- Main Caddy admin API ---
+    if iptables -S OUTPUT 2>/dev/null | grep "uid-owner $AI_UID" | grep -q "dport 2019"; then
+        v_pass "Firewall rule blocking main Caddy admin API (:2019) present"
+    else
+        v_fail "No firewall rule for :2019 — AI could reconfigure your main Caddy!"
+    fi
+    if systemctl is-active --quiet caddy 2>/dev/null; then
+        if as_ai timeout 3 curl -s http://127.0.0.1:2019/config/ &>/dev/null; then
+            v_fail "AI can reach main Caddy admin API on :2019!"
+        else
+            v_pass "Main Caddy admin API unreachable by AI"
+        fi
+    else
+        v_skip "Main Caddy not running — skipped live admin API probe"
+    fi
+
+    # --- Outbound SMTP ---
+    if iptables -S OUTPUT 2>/dev/null | grep "uid-owner $AI_UID" | grep -q "dport 25"; then
+        v_pass "Outbound SMTP (port 25) blocked for AI"
+    else
+        v_fail "No firewall rule for port 25 — compromised AI could send spam"
+    fi
+
+    # --- SSH (check EFFECTIVE config, not just files) ---
+    SSHD_T=$(sshd -T 2>/dev/null || true)
+    if [ -n "$SSHD_T" ]; then
+        if echo "$SSHD_T" | grep -qi "^passwordauthentication no"; then
+            v_pass "SSH: password auth disabled (effective config)"
+        else
+            v_fail "SSH: password auth still enabled — check /etc/ssh/sshd_config.d/ overrides"
+        fi
+        if echo "$SSHD_T" | grep -qi "^permitrootlogin no"; then
+            v_pass "SSH: root login disabled (effective config)"
+        else
+            v_fail "SSH: root login still permitted"
+        fi
+        if echo "$SSHD_T" | grep -qi "denyusers.*$AI_USER"; then
+            v_pass "SSH: $AI_USER denied login (effective config)"
+        else
+            v_fail "SSH: $AI_USER is NOT denied login"
+        fi
+    else
+        v_skip "sshd -T failed — cannot check effective SSH config"
+    fi
+
+    # --- fail2ban ---
+    if systemctl is-active --quiet fail2ban 2>/dev/null; then
+        if fail2ban-client status sshd &>/dev/null; then
+            v_pass "fail2ban running with active sshd jail"
+        else
+            v_fail "fail2ban running but sshd jail is NOT active (journald backend issue?)"
+        fi
+    else
+        v_skip "fail2ban not running (step 7 not run)"
+    fi
+
+    # --- Resource limits ---
+    if [ -f "/etc/security/limits.d/${AI_USER}.conf" ]; then
+        v_pass "Per-process ulimits configured"
+    else
+        v_fail "No ulimits file for $AI_USER"
+    fi
+    if [ -f "/etc/systemd/system/user-${AI_UID}.slice.d/limits.conf" ]; then
+        v_pass "cgroup slice limits configured (total memory/CPU/tasks)"
+    else
+        v_fail "No cgroup slice limits — memory cap is per-process only"
+    fi
+
+    # --- Auto updates ---
+    if [ -f /etc/apt/apt.conf.d/20auto-upgrades ]; then
+        v_pass "Automatic security updates configured"
+    else
+        v_fail "Automatic security updates NOT configured"
+    fi
+
+    # --- Disk cap ---
+    if mountpoint -q "/srv/$AI_USER" 2>/dev/null; then
+        v_pass "AI disk usage capped ($(df -h "/srv/$AI_USER" | awk 'NR==2 {print $2}') filesystem on /srv/$AI_USER)"
+    else
+        v_skip "/srv/$AI_USER not on a capped filesystem (step 12 skipped?)"
+    fi
+
+    # --- Process hiding ---
+    if findmnt -no OPTIONS /proc 2>/dev/null | grep -q hidepid; then
+        if as_ai test -d /proc/1 2>/dev/null; then
+            v_fail "hidepid set but AI can still see other processes"
+        else
+            v_pass "AI cannot see other users' processes (hidepid)"
+        fi
+    else
+        v_skip "hidepid not enabled on /proc (step 13 skipped?)"
+    fi
+
+    # --- Audit trail ---
+    if systemctl is-active --quiet auditd 2>/dev/null && [ -f "/etc/audit/rules.d/${AI_USER}.rules" ]; then
+        v_pass "auditd logging every command the AI runs"
+    else
+        v_skip "auditd not logging AI commands (step 14 skipped?)"
+    fi
+
+    echo ""
+    echo "  ─────────────────────────────────────────────────────"
+    if [ "$V_FAIL" -eq 0 ]; then
+        echo -e "  ${GREEN}✅ $V_PASS checks passed, 0 failed${NC}"
+        exit 0
+    else
+        echo -e "  ${RED}❌ $V_FAIL check(s) FAILED${NC} ($V_PASS passed) — re-run the hardening script"
+        exit 1
+    fi
+}
+
+# =============================================================================
+# Startup
+# =============================================================================
+
 # Must run as root
 if [ "$EUID" -ne 0 ]; then
     err "Run this script with sudo"
     exit 1
 fi
 
+MODE="${1:-harden}"
+case "$MODE" in
+    harden|verify) ;;
+    *)
+        err "Usage: sudo bash harden-pi.sh [verify]"
+        exit 1
+        ;;
+esac
+
 echo ""
 echo "================================================"
-echo "  Raspberry Pi Hardening for AI Agent Isolation  "
+if [ "$MODE" = "verify" ]; then
+    echo "  Raspberry Pi Hardening — Verification Mode    "
+else
+    echo "  Raspberry Pi Hardening for AI Agent Isolation "
+fi
 echo "================================================"
 echo ""
 
@@ -110,6 +319,10 @@ fi
 if [ "$AI_USER" = "$MAIN_USER" ]; then
     err "AI agent account cannot be the same as your account ($MAIN_USER)"
     exit 1
+fi
+
+if [ "$MODE" = "verify" ]; then
+    run_verify   # exits
 fi
 
 echo ""
@@ -211,19 +424,20 @@ log "Created explicit sudo deny rule"
 
 
 # =============================================================================
-# STEP 4: Block AI agent from your home network (LAN)
+# STEP 4: Block AI agent from your home network (LAN) + local attack surface
 # =============================================================================
 
 STEP4_DONE=""
 if id "$AI_USER" &>/dev/null; then
     AI_UID=$(id -u "$AI_USER")
     EXISTING_RULES=$(iptables -S OUTPUT 2>/dev/null | grep -c "owner --uid-owner $AI_UID" || true)
-    if [ "$EXISTING_RULES" -ge 4 ]; then
-        STEP4_DONE="Found $EXISTING_RULES iptables rules blocking LAN for UID $AI_UID."
+    HAS_2019=$(iptables -S OUTPUT 2>/dev/null | grep "owner --uid-owner $AI_UID" | grep -c "dport 2019" || true)
+    if [ "$EXISTING_RULES" -ge 6 ] && [ "$HAS_2019" -ge 1 ]; then
+        STEP4_DONE="Found $EXISTING_RULES iptables rules for UID $AI_UID (LAN + Caddy admin + SMTP)."
     fi
 fi
 
-confirm_step 4 "Block AI agent from LAN access" \
+confirm_step 4 "Block AI agent from LAN + local attack surface" \
 "THE BIG ONE. If the AI gets compromised, an attacker will try to scan
 your local network — router, NAS, other computers, smart home devices.
 These iptables rules block ALL traffic from '$AI_USER' to private IPs:
@@ -231,9 +445,13 @@ These iptables rules block ALL traffic from '$AI_USER' to private IPs:
   • 10.0.0.0/8      (some networks)
   • 172.16.0.0/12   (other private range)
   • 169.254.0.0/16  (link-local / mDNS)
-Matching ip6tables rules block the IPv6 LAN too:
-  • fc00::/7        (unique local addresses)
-  • fe80::/10       (link-local)
+Matching ip6tables rules block the IPv6 LAN too (fc00::/7, fe80::/10).
+It ALSO blocks two local holes:
+  • Port 2019 — the main Caddy's admin API. Without this rule the AI
+    could POST a new config to localhost:2019 and hijack YOUR routes.
+  • Port 25 — outbound SMTP, so a compromised agent can't send spam.
+And it adds an EXCEPTION so DNS keeps working: your resolver is usually
+the router itself, which the LAN block would otherwise silently break.
 The AI can still reach the internet (for API calls) but cannot touch
 anything on your LAN. Rules are persisted across reboots." \
 "$STEP4_DONE" && {
@@ -245,6 +463,41 @@ iptables -S OUTPUT 2>/dev/null | grep "owner --uid-owner $AI_UID" | while read -
     iptables $(echo "$rule" | sed 's/-A/-D/')
 done 2>/dev/null || true
 
+# --- Exceptions FIRST (iptables matches in order) ---
+# DNS: /etc/resolv.conf usually points at the router — a private IP that
+# the LAN block below would drop, silently breaking all AI DNS lookups.
+DNS_ALLOWED=""
+while read -r ns; do
+    case "$ns" in
+        10.*|192.168.*|169.254.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*)
+            iptables -A OUTPUT -m owner --uid-owner "$AI_UID" -d "$ns" -p udp --dport 53 -j ACCEPT
+            iptables -A OUTPUT -m owner --uid-owner "$AI_UID" -d "$ns" -p tcp --dport 53 -j ACCEPT
+            DNS_ALLOWED="$DNS_ALLOWED $ns"
+            ;;
+    esac
+done < <(awk '/^nameserver/ {print $2}' /etc/resolv.conf 2>/dev/null)
+
+GW=$(ip route show default 2>/dev/null | awk '{print $3; exit}')
+if [ -z "$DNS_ALLOWED" ] && [ -n "$GW" ]; then
+    iptables -A OUTPUT -m owner --uid-owner "$AI_UID" -d "$GW" -p udp --dport 53 -j ACCEPT
+    iptables -A OUTPUT -m owner --uid-owner "$AI_UID" -d "$GW" -p tcp --dport 53 -j ACCEPT
+    DNS_ALLOWED=" $GW (default gateway)"
+fi
+if [ -n "$DNS_ALLOWED" ]; then
+    log "DNS exception: allowed port 53 to$DNS_ALLOWED"
+else
+    log "No LAN resolver found in /etc/resolv.conf — no DNS exception needed"
+fi
+
+# --- Local holes ---
+# Main Caddy admin API: unauthenticated on localhost:2019 by default.
+# Without this, the AI could rewrite your reverse-proxy routes.
+iptables -A OUTPUT -m owner --uid-owner "$AI_UID" -p tcp --dport 2019 -j DROP
+# Outbound SMTP: a compromised agent shouldn't be able to send spam.
+iptables -A OUTPUT -m owner --uid-owner "$AI_UID" -p tcp --dport 25 -j DROP
+log "Blocked $AI_USER from main Caddy admin API (:2019) and outbound SMTP (:25)"
+
+# --- LAN block ---
 iptables -A OUTPUT -m owner --uid-owner "$AI_UID" -d 192.168.0.0/16 -j DROP
 iptables -A OUTPUT -m owner --uid-owner "$AI_UID" -d 10.0.0.0/8 -j DROP
 iptables -A OUTPUT -m owner --uid-owner "$AI_UID" -d 172.16.0.0/12 -j DROP
@@ -259,9 +512,11 @@ if command -v ip6tables &>/dev/null; then
         ip6tables $(echo "$rule" | sed 's/-A/-D/')
     done 2>/dev/null || true
 
+    ip6tables -A OUTPUT -m owner --uid-owner "$AI_UID" -p tcp --dport 2019 -j DROP
+    ip6tables -A OUTPUT -m owner --uid-owner "$AI_UID" -p tcp --dport 25 -j DROP
     ip6tables -A OUTPUT -m owner --uid-owner "$AI_UID" -d fc00::/7 -j DROP
     ip6tables -A OUTPUT -m owner --uid-owner "$AI_UID" -d fe80::/10 -j DROP
-    log "Blocked $AI_USER (UID $AI_UID) from LAN traffic (IPv6: fc00::/7, fe80::/10)"
+    log "Blocked $AI_USER (UID $AI_UID) over IPv6 too (LAN + :2019 + :25)"
 else
     warn "ip6tables not found — IPv6 LAN not blocked (fine if IPv6 is disabled)"
 fi
@@ -279,35 +534,54 @@ fi
 
 
 # =============================================================================
-# STEP 5: Set resource limits
+# STEP 5: Set resource limits (ulimits + cgroup slice)
 # =============================================================================
 
 STEP5_DONE=""
-if [ -f "/etc/security/limits.d/${AI_USER}.conf" ]; then
-    STEP5_DONE="Limits file /etc/security/limits.d/${AI_USER}.conf already exists."
+AI_UID=$(id -u "$AI_USER" 2>/dev/null || true)
+if [ -f "/etc/security/limits.d/${AI_USER}.conf" ] \
+   && [ -n "$AI_UID" ] && [ -f "/etc/systemd/system/user-${AI_UID}.slice.d/limits.conf" ]; then
+    STEP5_DONE="ulimits file and cgroup slice limits both exist."
 fi
 
 confirm_step 5 "Set resource limits for AI agent" \
-"Prevents the AI from taking down your Pi via:
-  • Fork bomb → capped at 200 processes
-  • Memory exhaustion → capped at 2GB virtual memory
-  • Disk filling → max 1GB per file
-  • File descriptor exhaustion → max 4096 open files
-  • Core dumps disabled → no leaking memory contents
-Even if the AI tries, it hits these hard limits and gets killed,
-while your services keep running normally." \
+"Two layers of protection:
+  1. Per-process ulimits:
+     • Fork bomb → capped at 200 processes
+     • File descriptor exhaustion → max 4096 open files
+     • Max 1GB per file, core dumps disabled
+  2. cgroup slice — caps the TOTAL across ALL AI processes combined:
+     • MemoryMax 2GB, CPUQuota 300% (3 cores), TasksMax 200
+The old per-process 2GB virtual-memory cap ('as') is gone: it broke
+mmap-heavy runtimes (Node, JVM) and was trivially bypassed by just
+spawning more processes. The cgroup slice caps the real total.
+NOTE: the slice applies to the AI's login sessions and user services.
+If you launch the agent yourself, do it via the provided
+systemd/ai-agent.service.example so the caps actually apply." \
 "$STEP5_DONE" && {
+
+AI_UID=$(id -u "$AI_USER")
 
 cat > "/etc/security/limits.d/${AI_USER}.conf" << EOF
 # Limits for $AI_USER — prevents resource exhaustion attacks
 $AI_USER    hard    nproc       200
 $AI_USER    hard    nofile      4096
-$AI_USER    hard    as          2097152
 $AI_USER    hard    fsize       1048576
 $AI_USER    hard    core        0
 EOF
+log "Per-process ulimits configured in /etc/security/limits.d/${AI_USER}.conf"
 
-log "Resource limits configured in /etc/security/limits.d/${AI_USER}.conf"
+mkdir -p "/etc/systemd/system/user-${AI_UID}.slice.d"
+cat > "/etc/systemd/system/user-${AI_UID}.slice.d/limits.conf" << EOF
+# cgroup limits for $AI_USER (UID $AI_UID) — total across ALL its processes
+[Slice]
+MemoryMax=2G
+MemorySwapMax=1G
+TasksMax=200
+CPUQuota=300%
+EOF
+systemctl daemon-reload
+log "cgroup slice limits configured (2GB total RAM, 3 cores, 200 tasks)"
 
 }
 
@@ -316,16 +590,11 @@ log "Resource limits configured in /etc/security/limits.d/${AI_USER}.conf"
 # STEP 6: Harden SSH
 # =============================================================================
 
+SSH_HARDEN_CONF="/etc/ssh/sshd_config.d/00-hardening.conf"
+
 STEP6_DONE=""
-SSHD_CONFIG="/etc/ssh/sshd_config"
-if [ -f "$SSHD_CONFIG" ]; then
-    SSH_HARDENED=true
-    grep -q "^PermitRootLogin no" "$SSHD_CONFIG" || SSH_HARDENED=false
-    grep -q "^PasswordAuthentication no" "$SSHD_CONFIG" || SSH_HARDENED=false
-    grep -q "DenyUsers.*$AI_USER" "$SSHD_CONFIG" || SSH_HARDENED=false
-    if $SSH_HARDENED; then
-        STEP6_DONE="sshd_config already has root login disabled, password auth off, and $AI_USER denied."
-    fi
+if [ -f "$SSH_HARDEN_CONF" ] && grep -q "DenyUsers $AI_USER" "$SSH_HARDEN_CONF"; then
+    STEP6_DONE="$SSH_HARDEN_CONF already exists with $AI_USER denied."
 fi
 
 confirm_step 6 "Harden SSH configuration" \
@@ -335,36 +604,46 @@ confirm_step 6 "Harden SSH configuration" \
   • Blocks '$AI_USER' from SSH login entirely
   • Limits auth attempts to 3
   • Disables X11 and agent forwarding
+Settings go in /etc/ssh/sshd_config.d/00-hardening.conf — on modern
+Debian, files there are read FIRST and the first value wins, so editing
+sshd_config directly can be silently overridden by cloud-init configs.
+The config is validated with 'sshd -t' before finishing.
 ⚠️  IMPORTANT: Make sure you have SSH key access set up BEFORE
-restarting SSH! The script backs up sshd_config but does NOT
-restart SSH — you do that manually after verifying." \
+restarting SSH! The script does NOT restart SSH — you do that
+manually after verifying." \
 "$STEP6_DONE" && {
 
 SSHD_CONFIG="/etc/ssh/sshd_config"
 cp "$SSHD_CONFIG" "${SSHD_CONFIG}.bak.$(date +%s)"
 log "Backed up sshd_config"
 
-declare -A SSH_SETTINGS=(
-    ["PermitRootLogin"]="no"
-    ["PasswordAuthentication"]="no"
-    ["MaxAuthTries"]="3"
-    ["X11Forwarding"]="no"
-    ["AllowAgentForwarding"]="no"
-)
+# sshd uses first-value-wins. Debian includes sshd_config.d/* at the TOP of
+# sshd_config, and 00- sorts before 50-cloud-init.conf etc, so our file wins.
+mkdir -p /etc/ssh/sshd_config.d
+if ! grep -qE '^\s*Include\s+/etc/ssh/sshd_config\.d/' "$SSHD_CONFIG"; then
+    sed -i '1i Include /etc/ssh/sshd_config.d/*.conf' "$SSHD_CONFIG"
+    log "Added Include directive for sshd_config.d to sshd_config"
+fi
 
-for key in "${!SSH_SETTINGS[@]}"; do
-    val="${SSH_SETTINGS[$key]}"
-    if grep -q "^#*${key}" "$SSHD_CONFIG"; then
-        sed -i "s/^#*${key}.*/${key} ${val}/" "$SSHD_CONFIG"
-    else
-        echo "${key} ${val}" >> "$SSHD_CONFIG"
-    fi
-    log "SSH: $key = $val"
-done
+cat > "$SSH_HARDEN_CONF" << EOF
+# Hardening — managed by harden-pi.sh
+# Named 00- so it sorts first: sshd uses the FIRST value it sees,
+# so this file overrides everything else in sshd_config.d/ and sshd_config.
+PermitRootLogin no
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+MaxAuthTries 3
+X11Forwarding no
+AllowAgentForwarding no
+DenyUsers $AI_USER
+EOF
+log "Wrote $SSH_HARDEN_CONF"
 
-if ! grep -q "DenyUsers $AI_USER" "$SSHD_CONFIG"; then
-    echo "DenyUsers $AI_USER" >> "$SSHD_CONFIG"
-    log "SSH: Blocked $AI_USER from SSH login"
+if sshd -t 2>/dev/null; then
+    log "sshd config validated (sshd -t passed)"
+else
+    rm -f "$SSH_HARDEN_CONF"
+    err "sshd -t FAILED — removed $SSH_HARDEN_CONF, SSH config unchanged"
 fi
 
 warn "Test SSH in a NEW terminal, then: sudo systemctl restart ssh"
@@ -377,14 +656,18 @@ warn "Test SSH in a NEW terminal, then: sudo systemctl restart ssh"
 # =============================================================================
 
 STEP7_DONE=""
-if command -v fail2ban-client &>/dev/null && systemctl is-active --quiet fail2ban 2>/dev/null; then
-    STEP7_DONE="fail2ban is installed and running."
+if command -v fail2ban-client &>/dev/null && systemctl is-active --quiet fail2ban 2>/dev/null \
+   && grep -q 'backend *= *systemd' /etc/fail2ban/jail.local 2>/dev/null; then
+    STEP7_DONE="fail2ban is installed, running, and using the systemd journal backend."
 fi
 
 confirm_step 7 "Install and configure fail2ban" \
 "Watches SSH auth logs and automatically bans IPs that fail login
 repeatedly. After 3 failed attempts within 10 minutes, the IP is
 banned for 1 hour. This stops brute-force attacks and port scanners.
+Uses 'backend = systemd' — modern Raspberry Pi OS logs to the journal
+and often has NO /var/log/auth.log, so the default file-based jail
+would silently watch nothing.
 Installs the fail2ban package if not already present." \
 "$STEP7_DONE" && {
 
@@ -398,7 +681,7 @@ cat > /etc/fail2ban/jail.local << 'EOF'
 enabled  = true
 port     = ssh
 filter   = sshd
-logpath  = /var/log/auth.log
+backend  = systemd
 maxretry = 3
 bantime  = 3600
 findtime = 600
@@ -406,7 +689,7 @@ EOF
 
 systemctl enable fail2ban
 systemctl restart fail2ban
-log "fail2ban configured (3 attempts → 1hr ban)"
+log "fail2ban configured (3 attempts → 1hr ban, journald backend)"
 
 }
 
@@ -488,20 +771,14 @@ log "/srv/$AI_USER → AI's space (full freedom)"
 
 # Give your account read access to AI's directories via ACL
 # This does NOT give the AI access to your directory
-if command -v setfacl &>/dev/null; then
-    setfacl -R -m u:"$MAIN_USER":rX "/srv/$AI_USER"
-    setfacl -R -d -m u:"$MAIN_USER":rX "/srv/$AI_USER"
-    setfacl -R -m u:"$MAIN_USER":rX "/home/$AI_USER"
-    setfacl -R -d -m u:"$MAIN_USER":rX "/home/$AI_USER"
-    log "ACL: $MAIN_USER can read /srv/$AI_USER and /home/$AI_USER"
-else
+if ! command -v setfacl &>/dev/null; then
     apt-get install -y -qq acl
-    setfacl -R -m u:"$MAIN_USER":rX "/srv/$AI_USER"
-    setfacl -R -d -m u:"$MAIN_USER":rX "/srv/$AI_USER"
-    setfacl -R -m u:"$MAIN_USER":rX "/home/$AI_USER"
-    setfacl -R -d -m u:"$MAIN_USER":rX "/home/$AI_USER"
-    log "Installed acl package and set read ACL for $MAIN_USER on /srv/$AI_USER and /home/$AI_USER"
 fi
+setfacl -R -m u:"$MAIN_USER":rX "/srv/$AI_USER"
+setfacl -R -d -m u:"$MAIN_USER":rX "/srv/$AI_USER"
+setfacl -R -m u:"$MAIN_USER":rX "/home/$AI_USER"
+setfacl -R -d -m u:"$MAIN_USER":rX "/home/$AI_USER"
+log "ACL: $MAIN_USER can read /srv/$AI_USER and /home/$AI_USER"
 
 }
 
@@ -520,7 +797,12 @@ confirm_step 10 "Install and configure Caddy" \
   • Main Caddy (root, :443) — handles HTTPS, routes to your apps + AI
   • AI Caddy ($AI_USER, :4000) — AI controls its own routing
 The AI can reload its own Caddy via admin API (no sudo needed).
-Main Caddyfile is owned by root — AI cannot modify it.
+Main Caddyfile is owned by root — AI cannot modify it, and the main
+Caddy's admin API (:2019) is firewalled from the AI (step 4).
+⚠️  Port squatting: 'reverse_proxy localhost:3000' trusts whoever
+listens on 3000. If your app is down, any local user could bind that
+port and receive its traffic. For sensitive apps, prefer unix sockets
+(see comments in the generated Caddyfile).
 You'll be prompted for your domain name (e.g. example.com)." \
 "$STEP10_DONE" && {
 
@@ -564,6 +846,11 @@ if [ ! -f /etc/caddy/Caddyfile ] || ! grep -q "reverse_proxy" /etc/caddy/Caddyfi
 #
 # To add a project:   add a block, then: sudo systemctl reload caddy
 # To remove a project: delete its block, then reload
+#
+# SECURITY: 'reverse_proxy localhost:PORT' trusts whoever listens on
+# that port. If your app is down, another local user could bind the
+# port and receive its traffic. For sensitive apps, use unix sockets:
+#     reverse_proxy unix//run/myapp/myapp.sock
 
 # Your projects
 bloodhound.$DOMAIN {
@@ -643,6 +930,8 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ReadWritePaths=/srv/$AI_USER
+MemoryMax=256M
+TasksMax=32
 
 [Install]
 WantedBy=multi-user.target
@@ -699,6 +988,195 @@ fi
 
 
 # =============================================================================
+# STEP 12: Cap AI disk usage (fixed-size filesystem)
+# =============================================================================
+
+STEP12_DONE=""
+if mountpoint -q "/srv/$AI_USER" 2>/dev/null; then
+    CAP_SIZE=$(df -h "/srv/$AI_USER" 2>/dev/null | awk 'NR==2 {print $2}')
+    STEP12_DONE="/srv/$AI_USER is already a dedicated ${CAP_SIZE} filesystem."
+fi
+
+confirm_step 12 "Cap AI disk usage" \
+"The ulimit 'fsize' only caps INDIVIDUAL files at 1GB — the AI could
+still fill your entire SD card with a thousand of them, taking down
+every service on the Pi. This creates a fixed-size disk image and
+mounts it at /srv/$AI_USER, so the AI can never use more than its
+allowance. The image is sparse: it only consumes real SD card space
+as the AI actually writes data.
+Existing contents of /srv/$AI_USER are migrated into the image
+(originals are left shadowed under the mount as a one-time backup).
+NOTE: /home/$AI_USER is not capped — keep the agent's work in /srv." \
+"$STEP12_DONE" && {
+
+DISK_IMG="/var/lib/${AI_USER}-disk.img"
+
+if mountpoint -q "/srv/$AI_USER" 2>/dev/null; then
+    warn "Already mounted — to resize: stop caddy-ai, umount /srv/$AI_USER,"
+    warn "delete $DISK_IMG and its /etc/fstab line, then re-run this step."
+else
+    echo ""
+    read -rp "  Max disk space for the AI in GB [10]: " DISK_GB
+    DISK_GB="${DISK_GB:-10}"
+    if ! [[ "$DISK_GB" =~ ^[0-9]+$ ]] || [ "$DISK_GB" -lt 1 ]; then
+        warn "Invalid size '$DISK_GB' — using 10 GB"
+        DISK_GB=10
+    fi
+
+    if [ ! -f "$DISK_IMG" ]; then
+        truncate -s "${DISK_GB}G" "$DISK_IMG"
+        mkfs.ext4 -q -F "$DISK_IMG"
+        log "Created ${DISK_GB}GB sparse disk image at $DISK_IMG"
+    else
+        log "Disk image already exists at $DISK_IMG"
+    fi
+
+    if ! grep -q "$DISK_IMG" /etc/fstab; then
+        echo "$DISK_IMG /srv/$AI_USER ext4 loop,nofail 0 2" >> /etc/fstab
+        log "Added /etc/fstab entry (mounts on boot, nofail)"
+    fi
+
+    CADDY_AI_WAS_ACTIVE=false
+    if systemctl is-active --quiet caddy-ai 2>/dev/null; then
+        CADDY_AI_WAS_ACTIVE=true
+        systemctl stop caddy-ai
+        log "Stopped caddy-ai during migration"
+    fi
+
+    mkdir -p "/srv/$AI_USER"
+
+    # Copy existing contents out BEFORE mounting (mount shadows them)
+    MIGRATE_DIR=""
+    if [ -n "$(ls -A "/srv/$AI_USER" 2>/dev/null)" ]; then
+        MIGRATE_DIR=$(mktemp -d /var/tmp/ai-migrate.XXXXXX)
+        cp -a "/srv/$AI_USER/." "$MIGRATE_DIR/"
+        log "Copied existing contents to $MIGRATE_DIR"
+    fi
+
+    systemctl daemon-reload
+    mount "/srv/$AI_USER"
+    log "Mounted $DISK_IMG at /srv/$AI_USER"
+
+    if [ -n "$MIGRATE_DIR" ]; then
+        cp -a "$MIGRATE_DIR/." "/srv/$AI_USER/"
+        rm -rf "$MIGRATE_DIR"
+        log "Migrated contents into the capped filesystem"
+        info "Originals remain shadowed beneath the mount — reclaim the space"
+        info "later with: sudo umount /srv/$AI_USER && sudo rm -rf /srv/$AI_USER/* && sudo mount /srv/$AI_USER"
+    fi
+
+    chown "$AI_USER:$AI_USER" "/srv/$AI_USER"
+    chmod 700 "/srv/$AI_USER"
+    if command -v setfacl &>/dev/null; then
+        setfacl -R -m u:"$MAIN_USER":rX "/srv/$AI_USER"
+        setfacl -R -d -m u:"$MAIN_USER":rX "/srv/$AI_USER"
+    fi
+
+    if $CADDY_AI_WAS_ACTIVE; then
+        systemctl start caddy-ai
+        log "Restarted caddy-ai"
+    fi
+
+    log "AI disk usage capped at ${DISK_GB}GB"
+fi
+
+}
+
+
+# =============================================================================
+# STEP 13: Hide other users' processes from the AI (hidepid)
+# =============================================================================
+
+STEP13_DONE=""
+if findmnt -no OPTIONS /proc 2>/dev/null | grep -q hidepid; then
+    STEP13_DONE="/proc is already mounted with hidepid."
+fi
+
+confirm_step 13 "Hide other users' processes (hidepid)" \
+"Right now the AI can read /proc and see EVERY process on the Pi —
+including full command lines. Secrets passed as CLI arguments or
+environment-revealing process names leak this way.
+Remounts /proc with hidepid=2: each user only sees their OWN
+processes. Your account is added to a 'proc' group that keeps full
+visibility (so htop etc. still work for you — after you re-login).
+Persisted via /etc/fstab." \
+"$STEP13_DONE" && {
+
+groupadd -f proc
+usermod -aG proc "$MAIN_USER"
+PROC_GID=$(getent group proc | cut -d: -f3)
+
+FSTAB_LINE="proc /proc proc defaults,hidepid=2,gid=$PROC_GID 0 0"
+if grep -qE '^\s*proc\s' /etc/fstab; then
+    sed -i "s|^\s*proc\s.*|$FSTAB_LINE|" /etc/fstab
+else
+    echo "$FSTAB_LINE" >> /etc/fstab
+fi
+log "fstab: /proc mounted with hidepid=2, gid=proc"
+
+mount -o "remount,hidepid=2,gid=$PROC_GID" /proc
+log "Remounted /proc — AI can no longer see other users' processes"
+warn "Log out and back in for YOUR 'proc' group membership to take effect"
+
+}
+
+
+# =============================================================================
+# STEP 14: Audit trail — log every command the AI runs
+# =============================================================================
+
+STEP14_DONE=""
+if systemctl is-active --quiet auditd 2>/dev/null && [ -f "/etc/audit/rules.d/${AI_USER}.rules" ]; then
+    STEP14_DONE="auditd is running with rules for $AI_USER."
+fi
+
+confirm_step 14 "Audit trail for AI commands" \
+"Installs auditd and logs every program the AI agent executes.
+If something ever looks off, you get a forensic trail of exactly
+what the AI (or an attacker using its account) ran and when.
+View the log with:  sudo ausearch -k ai-agent -i | tail -50
+Low overhead — it only records execve calls for the AI's UID." \
+"$STEP14_DONE" && {
+
+if ! command -v auditctl &>/dev/null; then
+    apt-get install -y -qq auditd
+fi
+
+AI_UID=$(id -u "$AI_USER")
+
+# Pick audit arch(s) for this machine
+case "$(uname -m)" in
+    aarch64|x86_64)
+        AUDIT_RULES="-a always,exit -F arch=b64 -S execve -F uid=$AI_UID -k ai-agent
+-a always,exit -F arch=b32 -S execve -F uid=$AI_UID -k ai-agent"
+        ;;
+    *)
+        AUDIT_RULES="-a always,exit -F arch=b32 -S execve -F uid=$AI_UID -k ai-agent"
+        ;;
+esac
+
+cat > "/etc/audit/rules.d/${AI_USER}.rules" << EOF
+## Log every command executed by $AI_USER (UID $AI_UID)
+$AUDIT_RULES
+EOF
+
+if ! augenrules --load 2>/dev/null; then
+    # Some kernels reject the b32 compat rule — retry with b64 only
+    grep -v 'arch=b32' "/etc/audit/rules.d/${AI_USER}.rules" > "/etc/audit/rules.d/${AI_USER}.rules.tmp"
+    mv "/etc/audit/rules.d/${AI_USER}.rules.tmp" "/etc/audit/rules.d/${AI_USER}.rules"
+    augenrules --load
+    warn "b32 compat rule rejected by kernel — loaded b64-only rules"
+fi
+
+systemctl enable auditd
+systemctl restart auditd 2>/dev/null || service auditd restart
+log "auditd logging all commands run by $AI_USER"
+log "View with: sudo ausearch -k ai-agent -i | tail -50"
+
+}
+
+
+# =============================================================================
 # DONE
 # =============================================================================
 
@@ -714,16 +1192,27 @@ echo "  Protected against:            How:"
 echo "  ─────────────────────────────────────────────"
 echo "  Privilege escalation          No sudo access"
 echo "  Credential theft              Home dir locked (700)"
-echo "  Network pivot to LAN          iptables UID-based drops"
-echo "  Resource exhaustion           ulimits (processes, memory, files)"
-echo "  SSH brute force               Key-only + fail2ban"
+echo "  Network pivot to LAN          iptables UID-based drops (DNS excepted)"
+echo "  Main Caddy route hijack       :2019 admin API firewalled from AI"
+echo "  Spam relay                    Outbound SMTP blocked"
+echo "  Resource exhaustion           ulimits + cgroup slice (total caps)"
+echo "  Disk filling                  Fixed-size filesystem on /srv/$AI_USER"
+echo "  Process snooping              hidepid=2 on /proc"
+echo "  SSH brute force               Key-only + fail2ban (journald backend)"
 echo "  Unpatched exploits            Auto security updates"
 echo "  Silent Wi-Fi dropouts         NetworkManager power save off"
+echo "  No forensic trail             auditd logs every AI command"
 echo ""
 echo "  Caddy:"
 echo "  Main Caddyfile:  /etc/caddy/Caddyfile"
 echo "  AI Caddyfile:    /srv/$AI_USER/Caddyfile (AI controls this)"
 echo "  AI reloads via:  caddy reload --config /srv/$AI_USER/Caddyfile --address localhost:2020"
+echo ""
+echo "  Run the agent itself via the hardened systemd unit so the"
+echo "  resource caps actually apply: see systemd/ai-agent.service.example"
+echo ""
+echo "  🔍 VERIFY THE WALLS HOLD:"
+echo "  sudo bash harden-pi.sh verify"
 echo ""
 echo "  ⚠️  BEFORE YOU REBOOT:"
 echo "  1. Verify SSH key is in /home/$MAIN_USER/.ssh/authorized_keys"

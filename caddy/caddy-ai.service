@@ -25,5 +25,9 @@ PrivateTmp=true
 ProtectSystem=strict
 ReadWritePaths=/srv/AI_USER
 
+# Resource caps (cgroup-enforced)
+MemoryMax=256M
+TasksMax=32
+
 [Install]
 WantedBy=multi-user.target

@@ -20,6 +20,16 @@
 # The AI sandbox block (ai.YOUR_DOMAIN) forwards all AI traffic to port 4000,
 # where the AI runs its own Caddy instance. The AI cannot modify THIS file —
 # it can only control routing within its own sandbox.
+#
+# SECURITY NOTES:
+# • This Caddy's admin API (localhost:2019) is firewalled from the AI user
+#   by the hardening script (step 4) — otherwise the AI could POST a new
+#   config to it and hijack your routes without ever touching this file.
+# • Port squatting: 'reverse_proxy localhost:3000' trusts whoever listens
+#   on 3000. If your app is down, ANY local user (including the AI) could
+#   bind that port and receive its traffic. For sensitive apps, prefer
+#   unix sockets in a directory only your user can write to:
+#       reverse_proxy unix//run/myapp/myapp.sock
 # =============================================================================
 
 # Your projects — each subdomain routes to the app's local port

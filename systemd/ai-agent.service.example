@@ -1,0 +1,54 @@
+# =============================================================================
+# Systemd service for the AI agent itself — RUN THE AGENT THROUGH THIS.
+#
+# Why: the cgroup slice limits (step 5) apply to login sessions and system
+# services. If you launch the agent with a bare `sudo -u AI_USER ...`, its
+# processes stay in YOUR session's cgroup and the memory/CPU/task caps do
+# NOT apply. This unit puts the agent in its own scope with hard caps plus
+# systemd sandboxing on top of the account-level walls.
+#
+# Setup:
+#   1. Replace AI_USER with your AI agent username
+#   2. Replace the ExecStart command with how you launch your agent
+#   3. Copy to /etc/systemd/system/ai-agent.service
+#   4. sudo systemctl daemon-reload && sudo systemctl enable --now ai-agent
+#
+# Logs: journalctl -u ai-agent -f
+# =============================================================================
+
+[Unit]
+Description=AI Agent (sandboxed)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=AI_USER
+Group=AI_USER
+WorkingDirectory=/srv/AI_USER
+
+# ↓↓↓ Replace with your agent's launch command ↓↓↓
+ExecStart=/usr/bin/env bash -lc 'exec your-agent-command-here'
+
+Restart=on-failure
+RestartSec=10
+
+# Resource caps — cgroup-enforced TOTALS across all child processes
+MemoryMax=2G
+MemorySwapMax=1G
+TasksMax=200
+CPUQuota=300%
+LimitNOFILE=4096
+
+# Sandboxing (defense in depth on top of the account-level walls)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/srv/AI_USER /home/AI_USER
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target
