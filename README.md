@@ -18,7 +18,7 @@ The script will ask for your username and the AI account name, then walk you thr
 
 ## What It Does
 
-The script runs 14 steps, each explained and requiring your confirmation:
+The script runs 15 steps, each explained and requiring your confirmation:
 
 | Step | What | Why |
 |------|-------|-----|
@@ -36,6 +36,7 @@ The script runs 14 steps, each explained and requiring your confirmation:
 | 12 | Cap AI disk usage | Fixed-size sparse disk image mounted at `/srv/<ai-user>` — the AI can never fill your SD card |
 | 13 | Hide processes (hidepid) | AI can't read other users' `/proc` entries — no snooping on command lines with secrets in them |
 | 14 | Audit trail (auditd) | Every command the AI runs is logged — `sudo ausearch -k ai-agent -i` |
+| 15 | Cloudflare Tunnel | Outbound-only exposure — no router port forwards, home IP hidden, routing controlled from your Cloudflare dashboard |
 
 ## Verify Mode
 
@@ -85,6 +86,8 @@ This script is designed for a specific scenario:
 | AI brute-forces SSH | Key-only auth + fail2ban (journald backend) |
 | Kernel exploit gives AI root | Automatic security updates patch daily |
 | No trace of what happened | auditd logs every command the AI executes |
+| Home IP exposed / ports open to the internet | Cloudflare Tunnel — outbound-only, no inbound ports needed |
+| AI steals the tunnel token and hijacks traffic | Token stored root-only (mode 600), cloudflared runs as its own sandboxed user |
 
 ### Known Residual Risks
 
@@ -121,6 +124,30 @@ sudo systemctl daemon-reload && sudo systemctl enable --now ai-agent
 ```
 
 A bare `sudo -u ai-agent ...` keeps the processes in *your* session's cgroup — the memory/CPU caps won't bind.
+
+## Cloudflare Tunnel
+
+Step 15 installs `cloudflared` and runs a **dashboard-managed tunnel** (token-based — no browser login on the headless Pi). You create the tunnel at [one.dash.cloudflare.com](https://one.dash.cloudflare.com) → Networks → Tunnels, paste the token into the script, and it runs as a dedicated unprivileged user with the token readable only by root.
+
+**Why:** no 80/443 port forwards on your router, home IP hidden, DDoS protection, works behind CGNAT. Once tunnel routes work, close the port forwards — the Pi needs **zero open inbound ports**.
+
+**Routing — two options:**
+
+1. **Dashboard-direct (recommended, simplest).** Add a Public Hostname per app in the tunnel's dashboard page:
+   - `bloodhound.YOUR_DOMAIN` → `HTTP` → `localhost:3000`
+   - `ai.YOUR_DOMAIN` → `HTTP` → `localhost:4000` (AI's sandbox Caddy)
+
+   Routing control moves into your Cloudflare account — like the root-owned Caddyfile, the AI can't touch it. Cloudflare's edge terminates TLS; main Caddy is bypassed.
+
+2. **Through main Caddy.** One wildcard Public Hostname `*.YOUR_DOMAIN` → `HTTPS` → `localhost:443`, with **No TLS Verify** enabled under the hostname's TLS settings. Then add a `local_certs` global option to `/etc/caddy/Caddyfile` (Let's Encrypt's HTTP challenge can't work with no inbound ports):
+   ```
+   {
+       local_certs
+   }
+   ```
+   Keeps all routing in the Caddyfile; note this breaks *direct* (non-tunnel) HTTPS access.
+
+The AI's `ai.YOUR_DOMAIN` sandbox works identically in both options.
 
 ## Directory Layout
 

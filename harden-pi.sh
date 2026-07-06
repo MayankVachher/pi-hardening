@@ -252,6 +252,30 @@ run_verify() {
         v_skip "auditd not logging AI commands (step 14 skipped?)"
     fi
 
+    # --- Cloudflare Tunnel ---
+    if command -v cloudflared &>/dev/null; then
+        if systemctl is-active --quiet cloudflared 2>/dev/null; then
+            v_pass "Cloudflare Tunnel running"
+        else
+            v_fail "cloudflared installed but tunnel service not running"
+        fi
+        if [ -f /etc/cloudflared/tunnel.env ]; then
+            TOKEN_META=$(stat -c '%a %U' /etc/cloudflared/tunnel.env 2>/dev/null)
+            if [ "$TOKEN_META" = "600 root" ]; then
+                v_pass "Tunnel token file is root-only (mode 600)"
+            else
+                v_fail "Tunnel token file perms are '$TOKEN_META' — should be '600 root'"
+            fi
+            if as_ai cat /etc/cloudflared/tunnel.env &>/dev/null; then
+                v_fail "AI can read the tunnel token — it could hijack your traffic!"
+            else
+                v_pass "Tunnel token unreadable by AI"
+            fi
+        fi
+    else
+        v_skip "cloudflared not installed (step 15 skipped?)"
+    fi
+
     echo ""
     echo "  ─────────────────────────────────────────────────────"
     if [ "$V_FAIL" -eq 0 ]; then
@@ -1177,6 +1201,118 @@ log "View with: sudo ausearch -k ai-agent -i | tail -50"
 
 
 # =============================================================================
+# STEP 15: Cloudflare Tunnel (no open ports, hidden home IP)
+# =============================================================================
+
+STEP15_DONE=""
+if command -v cloudflared &>/dev/null && systemctl is-active --quiet cloudflared 2>/dev/null; then
+    STEP15_DONE="cloudflared is installed and the tunnel service is running."
+fi
+
+confirm_step 15 "Set up Cloudflare Tunnel" \
+"Exposes your projects WITHOUT port-forwarding 80/443 on your router.
+cloudflared makes an outbound-only connection to Cloudflare's edge —
+your home IP stays hidden, you get DDoS protection for free, and it
+works behind CGNAT. Once routes work through the tunnel, you can
+remove the router port forwards: the Pi needs NO open inbound ports.
+Security properties:
+  • Routing lives in YOUR Cloudflare dashboard — the AI can't touch it
+  • The tunnel token is stored root-only (a readable token would let
+    the AI run a rogue connector and hijack your traffic)
+  • cloudflared runs as its own unprivileged user, sandboxed
+You'll need a free Cloudflare account with your domain on it, and a
+tunnel token from the Zero Trust dashboard (instructions shown next)." \
+"$STEP15_DONE" && {
+
+# Install cloudflared from Cloudflare's apt repo
+if ! command -v cloudflared &>/dev/null; then
+    . /etc/os-release
+    CODENAME="${VERSION_CODENAME:-bookworm}"
+    mkdir -p --mode=0755 /usr/share/keyrings
+    curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg -o /usr/share/keyrings/cloudflare-main.gpg
+    echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared $CODENAME main" > /etc/apt/sources.list.d/cloudflared.list
+    apt-get update -qq
+    apt-get install -y -qq cloudflared
+    log "cloudflared installed"
+else
+    log "cloudflared already installed"
+fi
+
+echo ""
+info "Create the tunnel in the Cloudflare dashboard:"
+info "  1. https://one.dash.cloudflare.com → Networks → Tunnels → Create a tunnel"
+info "  2. Choose 'Cloudflared' and name it (e.g. 'maverick-pi')"
+info "  3. In the install command shown, copy the long token after '--token'"
+echo ""
+read -rp "  Paste the tunnel token (blank to finish setup later): " TUNNEL_TOKEN
+TUNNEL_TOKEN=$(echo "$TUNNEL_TOKEN" | xargs)
+
+if [ -z "$TUNNEL_TOKEN" ]; then
+    warn "No token — cloudflared is installed but the tunnel is not configured."
+    warn "Re-run this step once you have a token."
+else
+    # Store the token root-only. NEVER put it on the ExecStart line or in a
+    # world-readable unit file — anyone holding the token (e.g. the AI
+    # reading a 644 file) could run a rogue connector and hijack traffic.
+    mkdir -p /etc/cloudflared
+    printf 'TUNNEL_TOKEN=%s\n' "$TUNNEL_TOKEN" > /etc/cloudflared/tunnel.env
+    chown root:root /etc/cloudflared/tunnel.env
+    chmod 600 /etc/cloudflared/tunnel.env
+    log "Token stored in /etc/cloudflared/tunnel.env (root-only, mode 600)"
+
+    # Dedicated unprivileged user — outbound-only daemon, no shell needed
+    if ! id cloudflared &>/dev/null; then
+        useradd -r -M -s /usr/sbin/nologin cloudflared
+        log "Created system user 'cloudflared'"
+    fi
+
+    cat > /etc/systemd/system/cloudflared.service << 'EOF'
+[Unit]
+Description=Cloudflare Tunnel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=cloudflared
+Group=cloudflared
+EnvironmentFile=/etc/cloudflared/tunnel.env
+ExecStart=/usr/bin/cloudflared --no-autoupdate tunnel run
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+MemoryMax=256M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable --now cloudflared
+    sleep 3
+    if systemctl is-active --quiet cloudflared; then
+        log "Cloudflare Tunnel is running (check dashboard: connector should show HEALTHY)"
+    else
+        warn "cloudflared failed to start — check: journalctl -u cloudflared -n 20"
+    fi
+
+    echo ""
+    info "Now add Public Hostnames in the tunnel's dashboard page:"
+    info "  ai.YOUR_DOMAIN          → HTTP → localhost:4000  (AI's sandbox Caddy)"
+    info "  bloodhound.YOUR_DOMAIN  → HTTP → localhost:3000  (each app by port)"
+    info "  (or route everything through main Caddy — see README, 'Cloudflare Tunnel')"
+    echo ""
+    info "Once routes work through the tunnel, remove the 80/443 port forwards"
+    info "on your router — the Pi then has NO open inbound ports."
+fi
+
+}
+
+
+# =============================================================================
 # DONE
 # =============================================================================
 
@@ -1202,6 +1338,7 @@ echo "  SSH brute force               Key-only + fail2ban (journald backend)"
 echo "  Unpatched exploits            Auto security updates"
 echo "  Silent Wi-Fi dropouts         NetworkManager power save off"
 echo "  No forensic trail             auditd logs every AI command"
+echo "  Exposed home IP / open ports  Cloudflare Tunnel (outbound-only)"
 echo ""
 echo "  Caddy:"
 echo "  Main Caddyfile:  /etc/caddy/Caddyfile"
