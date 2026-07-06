@@ -149,6 +149,8 @@ Step 15 installs `cloudflared` and runs a **dashboard-managed tunnel** (token-ba
 
 The AI's `ai.YOUR_DOMAIN` sandbox works identically in both options.
 
+**Re-running / rotating the token:** re-run step 15 and paste the new token — it cleanly stops and removes any existing tunnel service first (including one created manually with `cloudflared service install`) and moves old configs/tokens aside to a root-only backup dir. The script never runs `cloudflared service install` itself: that command embeds the token in a world-readable unit file. Entering a blank token leaves an existing setup untouched.
+
 ## Directory Layout
 
 After running:

@@ -1248,9 +1248,33 @@ read -rp "  Paste the tunnel token (blank to finish setup later): " TUNNEL_TOKEN
 TUNNEL_TOKEN=$(echo "$TUNNEL_TOKEN" | xargs)
 
 if [ -z "$TUNNEL_TOKEN" ]; then
-    warn "No token — cloudflared is installed but the tunnel is not configured."
+    warn "No token — no changes made to any existing tunnel setup."
     warn "Re-run this step once you have a token."
 else
+    # --- Tear down any existing tunnel setup first (clean re-run / token rotation) ---
+    # Covers a previous run of this step AND a manual 'cloudflared service
+    # install <token>' — the script never runs that command itself, because
+    # it embeds the token in a world-readable unit file.
+    if systemctl is-enabled --quiet cloudflared 2>/dev/null || systemctl is-active --quiet cloudflared 2>/dev/null; then
+        systemctl disable --now cloudflared 2>/dev/null || true
+        log "Stopped and disabled existing cloudflared service"
+    fi
+    rm -f /etc/systemd/system/cloudflared.service \
+          /etc/systemd/system/cloudflared-update.service \
+          /etc/systemd/system/cloudflared-update.timer \
+          /lib/systemd/system/cloudflared.service 2>/dev/null || true
+    systemctl daemon-reload
+
+    # Old configs/tokens (config.yml, cert.pem, tunnel.env, ...) can conflict
+    # with token mode — move them aside rather than delete.
+    if [ -d /etc/cloudflared ] && find /etc/cloudflared -maxdepth 1 -type f | grep -q .; then
+        BACKUP_DIR="/etc/cloudflared/old.$(date +%s)"
+        mkdir -p "$BACKUP_DIR"
+        find /etc/cloudflared -maxdepth 1 -type f -exec mv {} "$BACKUP_DIR/" \;
+        chmod 700 "$BACKUP_DIR"
+        log "Moved previous cloudflared config/token to $BACKUP_DIR (root-only)"
+    fi
+
     # Store the token root-only. NEVER put it on the ExecStart line or in a
     # world-readable unit file — anyone holding the token (e.g. the AI
     # reading a 644 file) could run a rogue connector and hijack traffic.
