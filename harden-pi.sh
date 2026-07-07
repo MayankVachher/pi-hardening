@@ -278,6 +278,26 @@ run_verify() {
         v_skip "auditd not logging AI commands (step 14 skipped?)"
     fi
 
+    # --- Wi-Fi power save (silent-dropout prevention) ---
+    WIFI_FOUND=false
+    for d in /sys/class/net/*/wireless; do
+        [ -d "$d" ] || continue
+        WIFI_FOUND=true
+        IFACE=$(basename "$(dirname "$d")")
+        if command -v iw &>/dev/null; then
+            if iw dev "$IFACE" get power_save 2>/dev/null | grep -q "off"; then
+                v_pass "Wi-Fi power save off on $IFACE (no silent dropouts)"
+            else
+                v_fail "Wi-Fi power save still ON for $IFACE — Pi can silently drop off the network"
+            fi
+        else
+            v_skip "iw not installed — cannot check power save on $IFACE"
+        fi
+    done
+    if ! $WIFI_FOUND; then
+        v_skip "No wireless interface (ethernet-only)"
+    fi
+
     # --- Cloudflare Tunnel ---
     if command -v cloudflared &>/dev/null; then
         if systemctl is-active --quiet cloudflared 2>/dev/null; then
@@ -1051,19 +1071,29 @@ log "AI reloads via: caddy reload --config /srv/$AI_USER/Caddyfile --address loc
 
 STEP11_DONE=""
 NM_CONF="/etc/NetworkManager/conf.d/wifi-powersave.conf"
-if [ -f "$NM_CONF" ] && grep -q "wifi.powersave = 2" "$NM_CONF"; then
-    STEP11_DONE="$NM_CONF already disables Wi-Fi power save."
+PS_UNIT="/etc/systemd/system/wifi-powersave-off.service"
+if [ -f "$PS_UNIT" ] && systemctl is-enabled --quiet wifi-powersave-off 2>/dev/null; then
+    STEP11_DONE="wifi-powersave-off.service is installed and enabled."
 fi
 
 confirm_step 11 "Disable Wi-Fi power save" \
 "The Pi's Broadcom Wi-Fi chip aggressively power-saves and can silently
 drop off the network after long uptimes — the Pi keeps running but is
-unreachable until power-cycled. This writes a NetworkManager config to
-keep Wi-Fi awake. If you're connected over Wi-Fi right now, the
-NetworkManager restart drops the connection for a few seconds.
+unreachable until power-cycled.
+This works regardless of which stack manages the Wi-Fi:
+  • A boot-time systemd unit runs 'iw ... set power_save off' on every
+    wireless interface — covers netplan/systemd-networkd (Ubuntu Server),
+    where a NetworkManager config would be a silent no-op.
+  • The NetworkManager config is also written for NM-managed systems.
 Skip if the Pi is ethernet-only." \
 "$STEP11_DONE" && {
 
+# iw works no matter who manages the interface
+if ! command -v iw &>/dev/null; then
+    apt-get install -y -qq iw
+fi
+
+# NM config — only effective where NM actually manages Wi-Fi; harmless otherwise
 mkdir -p /etc/NetworkManager/conf.d
 cat > "$NM_CONF" << 'EOF'
 [connection]
@@ -1072,10 +1102,38 @@ EOF
 
 if systemctl is-active --quiet NetworkManager; then
     systemctl restart NetworkManager
-    log "Wi-Fi power save disabled (NetworkManager restarted)"
+    log "NetworkManager config written (restarted)"
 else
-    log "Config written — applies when NetworkManager starts"
+    log "NetworkManager config written"
 fi
+
+# Stack-agnostic: turn power save off at every boot for all wireless
+# interfaces. On Ubuntu Server (netplan + systemd-networkd + wpa_supplicant)
+# this is the fix that actually works.
+cat > "$PS_UNIT" << 'EOF'
+[Unit]
+Description=Disable Wi-Fi power save (prevents silent dropouts)
+After=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'for d in /sys/class/net/*/wireless; do [ -d "$d" ] && /usr/sbin/iw dev "$(basename "$(dirname "$d")")" set power_save off; done; exit 0'
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now wifi-powersave-off
+log "wifi-powersave-off.service enabled (applies at every boot)"
+
+# Show the resulting state
+for d in /sys/class/net/*/wireless; do
+    [ -d "$d" ] || continue
+    IFACE=$(basename "$(dirname "$d")")
+    log "$IFACE: $(iw dev "$IFACE" get power_save 2>/dev/null || echo 'state unknown')"
+done
 
 }
 
@@ -1401,6 +1459,53 @@ EOF
     info "Once routes work through the tunnel, remove the 80/443 port forwards"
     info "on your router — the Pi then has NO open inbound ports."
 fi
+
+}
+
+
+# =============================================================================
+# STEP 16: Scheduled monthly reboot
+# =============================================================================
+
+STEP16_DONE=""
+if systemctl is-enabled --quiet scheduled-reboot.timer 2>/dev/null; then
+    STEP16_DONE="scheduled-reboot.timer is enabled ($(systemctl show scheduled-reboot.timer -p NextElapseUSecRealtime --value 2>/dev/null | head -1))."
+fi
+
+confirm_step 16 "Scheduled monthly reboot" \
+"Cheap insurance against long-uptime rot. The Pi's Wi-Fi firmware is
+known to wedge after months of uptime (requiring a physical power
+cycle), and security updates from step 8 include kernels that only
+take effect after a reboot. This installs a systemd timer that
+reboots the Pi at 04:00 on the 1st of every month.
+Skip if you prefer manual reboots." \
+"$STEP16_DONE" && {
+
+cat > /etc/systemd/system/scheduled-reboot.service << 'EOF'
+[Unit]
+Description=Scheduled maintenance reboot
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl reboot
+EOF
+
+cat > /etc/systemd/system/scheduled-reboot.timer << 'EOF'
+[Unit]
+Description=Monthly maintenance reboot (1st of month, 04:00)
+
+[Timer]
+OnCalendar=*-*-01 04:00:00
+# No Persistent=true: if the Pi was off at 4am, don't reboot it right
+# after someone powers it on.
+
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now scheduled-reboot.timer
+log "Monthly reboot scheduled: $(systemctl show scheduled-reboot.timer -p NextElapseUSecRealtime --value | head -1)"
 
 }
 

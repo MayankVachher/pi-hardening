@@ -18,7 +18,7 @@ The script will ask for your username and the AI account name, then walk you thr
 
 ## What It Does
 
-The script runs 15 steps, each explained and requiring your confirmation:
+The script runs 16 steps, each explained and requiring your confirmation:
 
 | Step | What | Why |
 |------|-------|-----|
@@ -32,11 +32,12 @@ The script runs 15 steps, each explained and requiring your confirmation:
 | 8 | Auto security updates | Daily patches for kernel/system exploits |
 | 9 | Create project directories | Separated /srv dirs with ACL for read access |
 | 10 | Install & configure Caddy | Dual reverse proxy — you own routing, AI owns its sandbox |
-| 11 | Disable Wi-Fi power save | Pi stays reachable — power save silently drops it off the network |
+| 11 | Disable Wi-Fi power save | Pi stays reachable — power save silently drops it off the network. Stack-agnostic: boot-time `iw set power_save off` unit (works on netplan/systemd-networkd, e.g. Ubuntu Server, where an NM config is a silent no-op) + NetworkManager config |
 | 12 | Cap AI disk usage | Fixed-size sparse disk image mounted at `/srv/<ai-user>` — the AI can never fill your SD card |
 | 13 | Hide processes (hidepid) | AI can't read other users' `/proc` entries — no snooping on command lines with secrets in them |
 | 14 | Audit trail (auditd) | Every command the AI runs is logged — `sudo ausearch -k ai-agent -i` |
 | 15 | Cloudflare Tunnel | Outbound-only exposure — no router port forwards, home IP hidden, routing controlled from your Cloudflare dashboard |
+| 16 | Scheduled monthly reboot | Long uptimes wedge the Wi-Fi firmware (needs a physical power cycle) and leave kernel updates unapplied — a 4am reboot on the 1st resets the clock |
 
 ## Verify Mode
 
