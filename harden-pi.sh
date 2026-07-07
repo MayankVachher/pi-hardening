@@ -98,6 +98,16 @@ run_verify() {
     fi
     AI_UID=$(id -u "$AI_USER")
 
+    # Sanity check: every "attack" below runs via runuser. If runuser itself
+    # is broken, failed attacks would false-PASS and DNS/internet would
+    # false-FAIL — so refuse to continue with unreliable results.
+    if ! as_ai true 2>/dev/null; then
+        err "Cannot run commands as '$AI_USER' (runuser failed):"
+        runuser -u "$AI_USER" -- true 2>&1 | sed 's/^/    /' || true
+        err "All verify results would be unreliable — fix this first."
+        exit 1
+    fi
+
     # --- Privilege escalation ---
     if as_ai sudo -n true &>/dev/null; then
         v_fail "AI can run sudo — privilege escalation possible!"
@@ -135,7 +145,12 @@ run_verify() {
     fi
 
     # --- DNS still works (the LAN block must not break it) ---
-    if as_ai getent hosts example.com &>/dev/null; then
+    # Multiple domains: some home routers return bogus NXDOMAIN for
+    # individual domains (seen in the wild with example.com), which would
+    # false-fail a single-domain check.
+    if as_ai getent hosts google.com &>/dev/null \
+       || as_ai getent hosts cloudflare.com &>/dev/null \
+       || as_ai getent hosts api.anthropic.com &>/dev/null; then
         v_pass "DNS resolution works for AI"
     else
         v_fail "DNS is broken for AI — LAN block may be dropping resolver traffic"
@@ -143,7 +158,8 @@ run_verify() {
 
     # --- Internet still works ---
     if command -v curl &>/dev/null; then
-        if as_ai timeout 10 curl -sI https://example.com &>/dev/null; then
+        if as_ai timeout 10 curl -sI https://www.google.com &>/dev/null \
+           || as_ai timeout 10 curl -sI https://api.anthropic.com &>/dev/null; then
             v_pass "Internet (HTTPS) works for AI"
         else
             v_fail "AI cannot reach the internet — API calls will fail"
