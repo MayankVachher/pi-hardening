@@ -244,7 +244,7 @@ The script is safe to re-run. Each step checks if it's already been applied:
 
 ## Requirements
 
-- Raspberry Pi OS (Debian-based)
+- A Debian-family OS — tested on Ubuntu Server 25.10 (Pi) and Raspberry Pi OS. Step 8 auto-detects the distro and writes the matching security-update origins (Ubuntu vs Debian/Raspbian — wrong origins would mean no updates ever install)
 - Root access (`sudo`)
 - Bash 4+
 

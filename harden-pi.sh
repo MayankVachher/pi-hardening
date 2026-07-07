@@ -8,7 +8,7 @@
 #
 # Run as:    sudo bash harden-pi.sh
 # Verify as: sudo bash harden-pi.sh verify   (proves the walls hold, run AS the AI user)
-# Tested on: Raspberry Pi OS (Debian-based)
+# Tested on: Ubuntu Server 25.10 (Pi), Raspberry Pi OS — any Debian-family OS
 # =============================================================================
 
 set -euo pipefail
@@ -738,22 +738,46 @@ log "fail2ban configured (3 attempts → 1hr ban, journald backend)"
 # STEP 8: Enable automatic security updates
 # =============================================================================
 
+# Detect distro — the security-update origins differ between Ubuntu and
+# Debian/Raspbian. Wrong origins = the config exists but NOTHING updates.
+OS_ID="$(. /etc/os-release && echo "${ID:-debian}")"
+
 STEP8_DONE=""
 if [ -f /etc/apt/apt.conf.d/50unattended-upgrades ] && [ -f /etc/apt/apt.conf.d/20auto-upgrades ]; then
-    STEP8_DONE="Unattended-upgrades config files already exist."
+    if [ "$OS_ID" = "ubuntu" ] && grep -q 'distro_id}:${distro_codename}-security' /etc/apt/apt.conf.d/50unattended-upgrades; then
+        STEP8_DONE="Unattended-upgrades configured with Ubuntu security origins."
+    elif [ "$OS_ID" != "ubuntu" ] && grep -q 'Debian-Security' /etc/apt/apt.conf.d/50unattended-upgrades; then
+        STEP8_DONE="Unattended-upgrades configured with Debian/Raspbian security origins."
+    else
+        STEP8_DONE=""  # config exists but origins don't match this distro — re-apply!
+    fi
 fi
 
 confirm_step 8 "Enable automatic security updates" \
 "Kernel and system exploits are discovered regularly. If an attacker
 compromises the AI agent and finds an unpatched local privilege
 escalation — game over. This enables daily automatic security patches
-from Debian/Raspbian repos. NO auto-reboot — you control when to
-reboot. Installs unattended-upgrades if not present." \
+(detected distro: $OS_ID — the right update origins are written for it;
+wrong origins would mean the config exists but nothing ever updates).
+NO auto-reboot — you control when to reboot.
+Installs unattended-upgrades if not present." \
 "$STEP8_DONE" && {
 
 apt-get install -y -qq unattended-upgrades
 
-cat > /etc/apt/apt.conf.d/50unattended-upgrades << 'EOF'
+if [ "$OS_ID" = "ubuntu" ]; then
+    cat > /etc/apt/apt.conf.d/50unattended-upgrades << 'EOF'
+Unattended-Upgrade::Allowed-Origins {
+    "${distro_id}:${distro_codename}-security";
+    "${distro_id}ESMApps:${distro_codename}-apps-security";
+    "${distro_id}ESM:${distro_codename}-infra-security";
+};
+Unattended-Upgrade::AutoFixInterruptedDpkg "true";
+Unattended-Upgrade::Remove-Unused-Dependencies "true";
+Unattended-Upgrade::Automatic-Reboot "false";
+EOF
+else
+    cat > /etc/apt/apt.conf.d/50unattended-upgrades << 'EOF'
 Unattended-Upgrade::Origins-Pattern {
     "origin=Debian,codename=${distro_codename},label=Debian-Security";
     "origin=Raspbian,codename=${distro_codename},label=Raspbian";
@@ -762,6 +786,7 @@ Unattended-Upgrade::AutoFixInterruptedDpkg "true";
 Unattended-Upgrade::Remove-Unused-Dependencies "true";
 Unattended-Upgrade::Automatic-Reboot "false";
 EOF
+fi
 
 cat > /etc/apt/apt.conf.d/20auto-upgrades << 'EOF'
 APT::Periodic::Update-Package-Lists "1";
