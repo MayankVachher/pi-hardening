@@ -235,6 +235,16 @@ run_verify() {
     else
         v_fail "No cgroup slice limits — memory cap is per-process only"
     fi
+    if command -v machinectl &>/dev/null; then
+        v_pass "machinectl available (real login sessions → caps bind)"
+    else
+        v_fail "machinectl missing — install systemd-container or the slice caps never bind"
+    fi
+    if [ -f "/var/lib/systemd/linger/$AI_USER" ]; then
+        v_pass "Lingering enabled — $AI_USER can run persistent user services"
+    else
+        v_skip "Lingering not enabled for $AI_USER (no persistent user services)"
+    fi
 
     # --- Auto updates ---
     if [ -f /etc/apt/apt.conf.d/20auto-upgrades ]; then
@@ -580,8 +590,9 @@ fi
 STEP5_DONE=""
 AI_UID=$(id -u "$AI_USER" 2>/dev/null || true)
 if [ -f "/etc/security/limits.d/${AI_USER}.conf" ] \
-   && [ -n "$AI_UID" ] && [ -f "/etc/systemd/system/user-${AI_UID}.slice.d/limits.conf" ]; then
-    STEP5_DONE="ulimits file and cgroup slice limits both exist."
+   && [ -n "$AI_UID" ] && [ -f "/etc/systemd/system/user-${AI_UID}.slice.d/limits.conf" ] \
+   && command -v machinectl &>/dev/null && [ -f "/var/lib/systemd/linger/$AI_USER" ]; then
+    STEP5_DONE="ulimits, cgroup slice, machinectl, and lingering all in place."
 fi
 
 confirm_step 5 "Set resource limits for AI agent" \
@@ -595,9 +606,11 @@ confirm_step 5 "Set resource limits for AI agent" \
 The old per-process 2GB virtual-memory cap ('as') is gone: it broke
 mmap-heavy runtimes (Node, JVM) and was trivially bypassed by just
 spawning more processes. The cgroup slice caps the real total.
-NOTE: the slice applies to the AI's login sessions and user services.
-If you launch the agent yourself, do it via the provided
-systemd/ai-agent.service.example so the caps actually apply." \
+The caps only bind inside a REAL login session, so this step also:
+  • installs systemd-container → enter via: sudo machinectl shell $AI_USER@
+    (plain 'sudo runuser' stays in YOUR session's cgroup — caps don't bind)
+  • enables lingering → the AI can run its own persistent services via
+    'systemctl --user' that start at boot, still inside the caps" \
 "$STEP5_DONE" && {
 
 AI_UID=$(id -u "$AI_USER")
@@ -622,6 +635,19 @@ CPUQuota=300%
 EOF
 systemctl daemon-reload
 log "cgroup slice limits configured (2GB total RAM, 3 cores, 200 tasks)"
+
+# machinectl (systemd-container) — the supported way to open a real login
+# session as the AI user, so the slice limits above actually apply.
+if ! command -v machinectl &>/dev/null; then
+    apt-get install -y -qq systemd-container
+    log "Installed systemd-container (machinectl)"
+fi
+log "Enter the AI account with: sudo machinectl shell $AI_USER@"
+
+# Lingering: the AI user's systemd instance starts at boot and survives
+# logout — lets it run persistent services via 'systemctl --user', no sudo.
+loginctl enable-linger "$AI_USER"
+log "Lingering enabled — $AI_USER can run persistent user services"
 
 }
 
@@ -1412,8 +1438,9 @@ echo "  Main Caddyfile:  /etc/caddy/Caddyfile"
 echo "  AI Caddyfile:    /srv/$AI_USER/Caddyfile (AI controls this)"
 echo "  AI reloads via:  caddy reload --config /srv/$AI_USER/Caddyfile --address localhost:2020"
 echo ""
-echo "  Run the agent itself via the hardened systemd unit so the"
-echo "  resource caps actually apply: see systemd/ai-agent.service.example"
+echo "  Work as the AI user:  sudo machinectl shell $AI_USER@"
+echo "  (real login session → resource caps bind; don't use plain runuser)"
+echo "  For a system-level agent service: see systemd/ai-agent.service.example"
 echo ""
 echo "  🔍 VERIFY THE WALLS HOLD:"
 echo "  sudo bash harden-pi.sh verify"

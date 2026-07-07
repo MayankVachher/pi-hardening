@@ -26,7 +26,7 @@ The script runs 15 steps, each explained and requiring your confirmation:
 | 2 | Lock down your home directory | AI can't read your SSH keys, tokens, .env files |
 | 3 | Block sudo access | AI can't become root, ever |
 | 4 | **Block LAN access + local holes** | **AI can't scan your home network** (IPv4 + IPv6), can't reach the main Caddy admin API (:2019), can't send spam (:25). DNS to your router stays allowed so the AI's lookups keep working |
-| 5 | Resource limits (ulimits + cgroup slice) | Fork bombs capped per-process; memory/CPU/tasks capped as a **total** across all AI processes |
+| 5 | Resource limits (ulimits + cgroup slice) | Fork bombs capped per-process; memory/CPU/tasks capped as a **total** across all AI processes. Installs `machinectl` (enter via `sudo machinectl shell <ai-user>@` — caps only bind in real login sessions) and enables lingering (AI runs persistent `systemctl --user` services, no sudo) |
 | 6 | Harden SSH | Key-only auth, no root login, AI blocked — written to `sshd_config.d/00-hardening.conf` so cloud-init files can't override it; validated with `sshd -t` |
 | 7 | Install fail2ban | Auto-bans IPs after failed logins — uses the **systemd journal backend** (modern Pi OS has no `/var/log/auth.log`) |
 | 8 | Auto security updates | Daily patches for kernel/system exploits |
