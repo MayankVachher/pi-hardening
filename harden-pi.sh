@@ -874,8 +874,10 @@ fi
 # Detect script directory for config templates
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Set up main Caddyfile if not present
-if [ ! -f /etc/caddy/Caddyfile ] || ! grep -q "reverse_proxy" /etc/caddy/Caddyfile; then
+# Set up main Caddyfile if not present or still the stock package default.
+# Match only UNcommented reverse_proxy — the stock Debian Caddyfile contains
+# '# reverse_proxy localhost:8080' as a comment, which must not count.
+if [ ! -f /etc/caddy/Caddyfile ] || ! grep -qE '^\s*reverse_proxy' /etc/caddy/Caddyfile; then
     if [ -f "$SCRIPT_DIR/caddy/Caddyfile.example" ]; then
         cp "$SCRIPT_DIR/caddy/Caddyfile.example" /etc/caddy/Caddyfile
     else
