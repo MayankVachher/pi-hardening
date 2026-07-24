@@ -294,7 +294,14 @@ run_verify() {
             v_skip "iw not installed — cannot check power save on $IFACE"
         fi
     done
-    if ! $WIFI_FOUND; then
+    if $WIFI_FOUND; then
+        if [ -x /usr/local/sbin/wifi-multicast-watchdog ] \
+           && systemctl is-enabled --quiet wifi-multicast-watchdog.timer 2>/dev/null; then
+            v_pass "Multicast-stall watchdog installed and enabled"
+        else
+            v_fail "Multicast-stall watchdog missing — Pi can go LAN-unreachable while internet still works"
+        fi
+    else
         v_skip "No wireless interface (ethernet-only)"
     fi
 
@@ -1072,19 +1079,30 @@ log "AI reloads via: caddy reload --config /srv/$AI_USER/Caddyfile --address loc
 STEP11_DONE=""
 NM_CONF="/etc/NetworkManager/conf.d/wifi-powersave.conf"
 PS_UNIT="/etc/systemd/system/wifi-powersave-off.service"
-if [ -f "$PS_UNIT" ] && systemctl is-enabled --quiet wifi-powersave-off 2>/dev/null; then
-    STEP11_DONE="wifi-powersave-off.service is installed and enabled."
+WD_SCRIPT="/usr/local/sbin/wifi-multicast-watchdog"
+if [ -f "$PS_UNIT" ] && systemctl is-enabled --quiet wifi-powersave-off 2>/dev/null \
+   && [ -x "$WD_SCRIPT" ] && systemctl is-enabled --quiet wifi-multicast-watchdog.timer 2>/dev/null; then
+    STEP11_DONE="wifi-powersave-off.service and wifi-multicast-watchdog.timer are installed and enabled."
 fi
 
-confirm_step 11 "Disable Wi-Fi power save" \
-"The Pi's Broadcom Wi-Fi chip aggressively power-saves and can silently
-drop off the network after long uptimes — the Pi keeps running but is
-unreachable until power-cycled.
-This works regardless of which stack manages the Wi-Fi:
-  • A boot-time systemd unit runs 'iw ... set power_save off' on every
-    wireless interface — covers netplan/systemd-networkd (Ubuntu Server),
-    where a NetworkManager config would be a silent no-op.
-  • The NetworkManager config is also written for NM-managed systems.
+confirm_step 11 "Wi-Fi reliability (power save off + multicast watchdog)" \
+"The Pi's Broadcom Wi-Fi chip has TWO known long-uptime failure modes
+that leave the Pi running but unreachable until power-cycled:
+1. Power save naps → missed traffic. Fixed by a boot-time systemd unit
+   running 'iw ... set power_save off' on every wireless interface —
+   works regardless of stack (an NM config alone is a silent no-op on
+   netplan/systemd-networkd systems; that config is written too).
+2. Silent multicast RX stall (seen on maverick, July 2026, ~14 days
+   uptime): the firmware stops receiving broadcast/multicast frames
+   while unicast keeps working. Outbound internet stays fine, so the
+   Pi looks healthy from the inside — but ARP and mDNS requests from
+   the LAN go unanswered ('no route to host'). A ping-the-gateway
+   watchdog can NEVER catch this. The one on-box symptom: the
+   router-advertisement-derived IPv6 address ages out and vanishes.
+   Fix: a watchdog timer (every 2 min) that watches for that address
+   disappearing and bounces the interface (~10s outage) to recover.
+   If 3 bounces don't recover it, the Pi reboots — last resort for a
+   headless box. Inert on networks without IPv6 RAs.
 Skip if the Pi is ethernet-only." \
 "$STEP11_DONE" && {
 
@@ -1134,6 +1152,97 @@ for d in /sys/class/net/*/wireless; do
     IFACE=$(basename "$(dirname "$d")")
     log "$IFACE: $(iw dev "$IFACE" get power_save 2>/dev/null || echo 'state unknown')"
 done
+
+# --- Multicast-stall watchdog ---
+cat > "$WD_SCRIPT" << 'EOF'
+#!/bin/sh
+# wifi-multicast-watchdog — recovers from the brcmfmac multicast RX stall.
+#
+# Failure mode: after long uptimes the Broadcom firmware silently stops
+# receiving broadcast/multicast frames while unicast keeps flowing.
+# Outbound internet still works, so the Pi looks healthy from the inside —
+# but ARP and mDNS requests from the LAN go unanswered and the Pi becomes
+# unreachable. A ping-based watchdog never fires.
+#
+# Detector: the RA-derived dynamic global IPv6 address on the interface.
+# Router Advertisements are multicast; when multicast RX dies the address
+# ages out and vanishes — the one on-box signal of the stall. Armed only
+# after such an address has been seen once this boot, so it stays inert
+# on networks without IPv6 RAs.
+#
+# Recovery: bounce the interface (re-inits the firmware RX path;
+# wpa_supplicant re-associates on its own, and the kernel sends a fresh
+# Router Solicitation on link-up). If 3 bounces in a row don't bring the
+# address back, reboot — the box is headless and otherwise unreachable.
+
+STATE=/run/wifi-multicast-watchdog
+mkdir -p "$STATE"
+
+for wdir in /sys/class/net/*/wireless; do
+    [ -d "$wdir" ] || continue
+    IFACE=$(basename "$(dirname "$wdir")")
+
+    if ip -6 addr show dev "$IFACE" scope global 2>/dev/null | grep -q dynamic; then
+        touch "$STATE/seen.$IFACE"
+        rm -f "$STATE/fails.$IFACE" "$STATE/bounces.$IFACE"
+        continue
+    fi
+
+    if [ ! -f "$STATE/seen.$IFACE" ]; then
+        if [ ! -f "$STATE/no-ra-warned.$IFACE" ]; then
+            logger -t wifi-watchdog "$IFACE: no RA-derived IPv6 address seen this boot — detector idle (network may lack IPv6 RAs)"
+            touch "$STATE/no-ra-warned.$IFACE"
+        fi
+        continue
+    fi
+
+    FAILS=$(( $(cat "$STATE/fails.$IFACE" 2>/dev/null || echo 0) + 1 ))
+    echo "$FAILS" > "$STATE/fails.$IFACE"
+    [ "$FAILS" -lt 3 ] && continue
+
+    BOUNCES=$(( $(cat "$STATE/bounces.$IFACE" 2>/dev/null || echo 0) + 1 ))
+    if [ "$BOUNCES" -gt 3 ]; then
+        logger -t wifi-watchdog "$IFACE: still no RA-derived address after 3 bounces — rebooting"
+        systemctl reboot
+        exit 0
+    fi
+    echo "$BOUNCES" > "$STATE/bounces.$IFACE"
+    echo 0 > "$STATE/fails.$IFACE"
+    logger -t wifi-watchdog "$IFACE: multicast RX stall suspected (dynamic IPv6 gone for $FAILS checks) — bouncing interface (attempt $BOUNCES/3)"
+    ip link set "$IFACE" down
+    sleep 2
+    ip link set "$IFACE" up
+done
+exit 0
+EOF
+chmod 755 "$WD_SCRIPT"
+log "Watchdog script installed at $WD_SCRIPT"
+
+cat > /etc/systemd/system/wifi-multicast-watchdog.service << EOF
+[Unit]
+Description=Check for Wi-Fi multicast RX stall and recover
+
+[Service]
+Type=oneshot
+ExecStart=$WD_SCRIPT
+EOF
+
+cat > /etc/systemd/system/wifi-multicast-watchdog.timer << 'EOF'
+[Unit]
+Description=Wi-Fi multicast-stall watchdog (every 2 min)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now wifi-multicast-watchdog.timer
+log "wifi-multicast-watchdog.timer enabled (checks every 2 min)"
+info "Watchdog activity logs under: journalctl -t wifi-watchdog"
 
 }
 
@@ -1534,7 +1643,7 @@ echo "  Disk filling                  Fixed-size filesystem on /srv/$AI_USER"
 echo "  Process snooping              hidepid=2 on /proc"
 echo "  SSH brute force               Key-only + fail2ban (journald backend)"
 echo "  Unpatched exploits            Auto security updates"
-echo "  Silent Wi-Fi dropouts         NetworkManager power save off"
+echo "  Silent Wi-Fi dropouts         Power save off + multicast-stall watchdog"
 echo "  No forensic trail             auditd logs every AI command"
 echo "  Exposed home IP / open ports  Cloudflare Tunnel (outbound-only)"
 echo ""

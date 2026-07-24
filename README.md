@@ -32,7 +32,7 @@ The script runs 16 steps, each explained and requiring your confirmation:
 | 8 | Auto security updates | Daily patches for kernel/system exploits |
 | 9 | Create project directories | Separated /srv dirs with ACL for read access |
 | 10 | Install & configure Caddy | Dual reverse proxy — you own routing, AI owns its sandbox |
-| 11 | Disable Wi-Fi power save | Pi stays reachable — power save silently drops it off the network. Stack-agnostic: boot-time `iw set power_save off` unit (works on netplan/systemd-networkd, e.g. Ubuntu Server, where an NM config is a silent no-op) + NetworkManager config |
+| 11 | Wi-Fi reliability | Pi stays reachable across two Broadcom firmware failure modes. (a) Power save naps: boot-time `iw set power_save off` unit (stack-agnostic — an NM config alone is a silent no-op on netplan/systemd-networkd; that config is written too). (b) Silent multicast RX stall: after long uptimes the firmware stops receiving broadcast/multicast — outbound internet keeps working but LAN ARP/mDNS go unanswered, so ping-based watchdogs never fire. A 2-min watchdog timer detects the RA-derived IPv6 address vanishing (RAs are multicast — the one on-box symptom) and bounces the interface; after 3 failed bounces it reboots. Inert on networks without IPv6 RAs |
 | 12 | Cap AI disk usage | Fixed-size sparse disk image mounted at `/srv/<ai-user>` — the AI can never fill your SD card |
 | 13 | Hide processes (hidepid) | AI can't read other users' `/proc` entries — no snooping on command lines with secrets in them |
 | 14 | Audit trail (auditd) | Every command the AI runs is logged — `sudo ausearch -k ai-agent -i` |
