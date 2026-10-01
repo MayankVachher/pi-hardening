@@ -278,7 +278,7 @@ run_verify() {
         v_skip "auditd not logging AI commands (step 14 skipped?)"
     fi
 
-    # --- Wi-Fi power save (silent-dropout prevention) ---
+    # --- Wi-Fi reliability (step 11) ---
     WIFI_FOUND=false
     for d in /sys/class/net/*/wireless; do
         [ -d "$d" ] || continue
@@ -295,11 +295,27 @@ run_verify() {
         fi
     done
     if $WIFI_FOUND; then
-        if [ -x /usr/local/sbin/wifi-multicast-watchdog ] \
-           && systemctl is-enabled --quiet wifi-multicast-watchdog.timer 2>/dev/null; then
-            v_pass "Multicast-stall watchdog installed and enabled"
+        if [ -d /sys/module/brcmfmac ]; then
+            if grep -qs 'roamoff=1' /etc/modprobe.d/brcmfmac.conf; then
+                if [ "$(cat /sys/module/brcmfmac/parameters/roamoff 2>/dev/null)" = "1" ]; then
+                    v_pass "Broadcom driver options active (firmware roaming off)"
+                else
+                    v_fail "Broadcom driver options written but not loaded yet — reboot once"
+                fi
+            else
+                v_fail "Broadcom driver options missing (/etc/modprobe.d/brcmfmac.conf)"
+            fi
         else
-            v_fail "Multicast-stall watchdog missing — Pi can go LAN-unreachable while internet still works"
+            v_skip "Wi-Fi chip isn't Broadcom (brcmfmac not loaded) — driver options don't apply"
+        fi
+        if [ -x /usr/local/sbin/wifi-stall-detector ] \
+           && systemctl is-enabled --quiet wifi-stall-detector.timer 2>/dev/null; then
+            v_pass "Wi-Fi stall detector installed and enabled"
+        else
+            v_fail "Wi-Fi stall detector missing — Pi can drop off the LAN while internet still works"
+        fi
+        if [ -e /usr/local/sbin/wifi-multicast-watchdog ]; then
+            v_fail "Old RA-address watchdog still installed — re-run step 11 to remove it"
         fi
     else
         v_skip "No wireless interface (ethernet-only)"
@@ -327,6 +343,48 @@ run_verify() {
         fi
     else
         v_skip "cloudflared not installed (step 15 skipped?)"
+    fi
+
+    # --- Reboot policy (step 16) ---
+    if [ -e /etc/systemd/system/scheduled-reboot.timer ]; then
+        v_fail "Monthly scheduled reboot still installed — re-run step 16 to remove it"
+    else
+        v_pass "No scheduled reboots"
+    fi
+    if systemctl is-enabled --quiet reboot-needed-alert.timer 2>/dev/null; then
+        v_pass "Pending-reboot email check enabled"
+    else
+        v_skip "Pending-reboot email check not installed (step 16 skipped?)"
+    fi
+
+    # --- Email alerts (step 17) ---
+    if [ -x /usr/local/sbin/pi-alert ] && [ -f /etc/msmtprc ]; then
+        RC_META=$(stat -c '%a %U' /etc/msmtprc 2>/dev/null)
+        if [ "$RC_META" = "600 root" ]; then
+            v_pass "Alert email config is root-only (mode 600)"
+        else
+            v_fail "Alert email config perms are '$RC_META' — should be '600 root'"
+        fi
+        if as_ai cat /etc/msmtprc &>/dev/null; then
+            v_fail "AI can read the alert email app password!"
+        else
+            v_pass "Alert email app password unreadable by AI"
+        fi
+    else
+        v_skip "Email alerts not configured (step 17 skipped?)"
+    fi
+
+    # --- Boot self-heal (step 18) ---
+    if [ -x /usr/local/sbin/boot-health-check ] \
+       && systemctl is-enabled --quiet boot-health-check.timer 2>/dev/null; then
+        v_pass "Boot self-heal enabled (logind check 5 min after boot)"
+    else
+        v_skip "Boot self-heal not installed (step 18 skipped?)"
+    fi
+    if busctl status org.freedesktop.login1 &>/dev/null; then
+        v_pass "logind holds its D-Bus name"
+    else
+        v_fail "logind has no D-Bus name — run: sudo systemctl restart systemd-logind"
     fi
 
     echo ""
@@ -409,6 +467,9 @@ echo ""
 read -p "  Start hardening? (Y/n) " -n 1 -r
 echo ""
 [[ $REPLY =~ ^[Nn]$ ]] && exit 1
+
+# Set by step 11 when it writes the Wi-Fi driver options (they need a reboot)
+WIFI_DRIVER_OPTS_WRITTEN=false
 
 
 # =============================================================================
@@ -1073,42 +1134,56 @@ log "AI reloads via: caddy reload --config /srv/$AI_USER/Caddyfile --address loc
 
 
 # =============================================================================
-# STEP 11: Disable Wi-Fi power save
+# STEP 11: Wi-Fi reliability (power save, driver options, stall detector)
 # =============================================================================
 
 STEP11_DONE=""
 NM_CONF="/etc/NetworkManager/conf.d/wifi-powersave.conf"
 PS_UNIT="/etc/systemd/system/wifi-powersave-off.service"
-WD_SCRIPT="/usr/local/sbin/wifi-multicast-watchdog"
+BRCM_CONF="/etc/modprobe.d/brcmfmac.conf"
+SD_SCRIPT="/usr/local/sbin/wifi-stall-detector"
+OLD_WD_SCRIPT="/usr/local/sbin/wifi-multicast-watchdog"
 if [ -f "$PS_UNIT" ] && systemctl is-enabled --quiet wifi-powersave-off 2>/dev/null \
-   && [ -x "$WD_SCRIPT" ] && systemctl is-enabled --quiet wifi-multicast-watchdog.timer 2>/dev/null; then
-    STEP11_DONE="wifi-powersave-off.service and wifi-multicast-watchdog.timer are installed and enabled."
+   && grep -qs 'roamoff=1' "$BRCM_CONF" \
+   && [ -x "$SD_SCRIPT" ] && systemctl is-enabled --quiet wifi-stall-detector.timer 2>/dev/null \
+   && [ ! -e "$OLD_WD_SCRIPT" ]; then
+    STEP11_DONE="Power save off, Broadcom driver options set, wifi-stall-detector.timer enabled."
 fi
 
-confirm_step 11 "Wi-Fi reliability (power save off + multicast watchdog)" \
-"The Pi's Broadcom Wi-Fi chip has TWO known long-uptime failure modes
-that leave the Pi running but unreachable until power-cycled:
-1. Power save naps → missed traffic. Fixed by a boot-time systemd unit
-   running 'iw ... set power_save off' on every wireless interface —
-   works regardless of stack (an NM config alone is a silent no-op on
-   netplan/systemd-networkd systems; that config is written too).
-2. Silent multicast RX stall (seen on maverick, July 2026, ~14 days
-   uptime): the firmware stops receiving broadcast/multicast frames
-   while unicast keeps working. Outbound internet stays fine, so the
-   Pi looks healthy from the inside — but ARP and mDNS requests from
-   the LAN go unanswered ('no route to host'). A ping-the-gateway
-   watchdog can NEVER catch this. The one on-box symptom: the
-   router-advertisement-derived IPv6 address ages out and vanishes.
-   Fix: a watchdog timer (every 2 min) that watches for that address
-   disappearing and bounces the interface (~10s outage) to recover.
-   If 3 bounces don't recover it, the Pi reboots — last resort for a
-   headless box. Inert on networks without IPv6 RAs.
+confirm_step 11 "Wi-Fi reliability (power save, driver options, stall detector)" \
+"The Pi's Broadcom Wi-Fi chip (CYW43455) can drop the Pi off the LAN
+while it still looks healthy from the inside:
+  While it stays connected, the chip stops passing broadcast and
+  multicast frames up to Linux. Unicast keeps working, so outbound
+  traffic and a Cloudflare Tunnel keep going, but LAN peers can't ARP
+  the Pi ('no route to host') and mDNS goes quiet. Nothing is logged
+  when it starts. Seen on maverick in July 2026, 14 and 27 days after
+  the last reconnect, once with power save off. Matches
+  raspberrypi/linux#2522.
+This step:
+1. Turns Wi-Fi power save off at every boot (works under any network
+   stack; an NM config is written too).
+2. Sets the brcmfmac options Raspberry Pi OS has shipped since April
+   2025: roamoff=1 feature_disable=0x282000 (firmware roaming off;
+   FWSUP, SAE offload and the channel survey off). Active after the
+   next reboot.
+3. Installs a stall detector, every 2 min: connected, but the kernel's
+   multicast counter hasn't moved for 10 minutes = stall. It saves
+   evidence, emails you (step 17) and reboots, at most once per 6 h.
+   It never bounces the link: when the Pi drops its own connection,
+   the router can refuse it for 7-10 minutes.
+   Removes the older watchdog, which watched an IPv6 address that
+   another device's router ads provided.
 Skip if the Pi is ethernet-only." \
 "$STEP11_DONE" && {
 
-# iw works no matter who manages the interface
+# iw works no matter who manages the interface; tcpdump captures evidence
+# when the stall detector fires
 if ! command -v iw &>/dev/null; then
     apt-get install -y -qq iw
+fi
+if ! command -v tcpdump &>/dev/null; then
+    apt-get install -y -qq tcpdump
 fi
 
 # NM config — only effective where NM actually manages Wi-Fi; harmless otherwise
@@ -1153,86 +1228,138 @@ for d in /sys/class/net/*/wireless; do
     log "$IFACE: $(iw dev "$IFACE" get power_save 2>/dev/null || echo 'state unknown')"
 done
 
-# --- Multicast-stall watchdog ---
-cat > "$WD_SCRIPT" << 'EOF'
-#!/bin/sh
-# wifi-multicast-watchdog — recovers from the brcmfmac multicast RX stall.
-#
-# Failure mode: after long uptimes the Broadcom firmware silently stops
-# receiving broadcast/multicast frames while unicast keeps flowing.
-# Outbound internet still works, so the Pi looks healthy from the inside —
-# but ARP and mDNS requests from the LAN go unanswered and the Pi becomes
-# unreachable. A ping-based watchdog never fires.
-#
-# Detector: the RA-derived dynamic global IPv6 address on the interface.
-# Router Advertisements are multicast; when multicast RX dies the address
-# ages out and vanishes — the one on-box signal of the stall. Armed only
-# after such an address has been seen once this boot, so it stays inert
-# on networks without IPv6 RAs.
-#
-# Recovery: bounce the interface (re-inits the firmware RX path;
-# wpa_supplicant re-associates on its own, and the kernel sends a fresh
-# Router Solicitation on link-up). If 3 bounces in a row don't bring the
-# address back, reboot — the box is headless and otherwise unreachable.
+# --- Broadcom driver options ---
+cat > "$BRCM_CONF" << 'EOF'
+# Written by harden-pi.sh step 11: the options Raspberry Pi OS ships
+# (RPi-Distro/firmware-nonfree commit 2788cb5, 2025-04-02).
+#   roamoff=1                firmware roaming off; wpa_supplicant picks the AP
+#   feature_disable=0x282000 clears FWSUP (bit 13), SAE (bit 19) and
+#                            DUMP_OBSS (bit 21), the channel survey behind the
+#                            harmless "brcmf_set_channel ... reason -52" lines
+options brcmfmac roamoff=1 feature_disable=0x282000
+EOF
+WIFI_DRIVER_OPTS_WRITTEN=true
+log "Broadcom driver options written to $BRCM_CONF (active after the next reboot)"
 
-STATE=/run/wifi-multicast-watchdog
-mkdir -p "$STATE"
+# --- Remove the older RA-address watchdog ---
+if [ -e /etc/systemd/system/wifi-multicast-watchdog.timer ] || [ -e "$OLD_WD_SCRIPT" ]; then
+    systemctl disable --now wifi-multicast-watchdog.timer 2>/dev/null || true
+    rm -f /etc/systemd/system/wifi-multicast-watchdog.timer \
+          /etc/systemd/system/wifi-multicast-watchdog.service \
+          "$OLD_WD_SCRIPT"
+    rm -rf /run/wifi-multicast-watchdog
+    log "Removed the old wifi-multicast-watchdog (it watched another device's router ads)"
+fi
+
+# --- Stall detector ---
+cat > "$SD_SCRIPT" << 'EOF'
+#!/bin/sh
+# wifi-stall-detector: catches the brcmfmac broadcast/multicast RX stall.
+# Installed by harden-pi.sh step 11. Runs every 2 minutes as root.
+#
+# Failure mode: while associated, the Wi-Fi chip stops passing broadcast and
+# multicast frames up to Linux. Unicast keeps working, so outbound traffic
+# looks fine, but LAN peers can't ARP the Pi and it drops off the network.
+# Nothing is logged when it starts (raspberrypi/linux#2522).
+#
+# Detector: the kernel's multicast receive counter. On a busy home network it
+# moves every few seconds (mDNS, router ads, SSDP). It arms once a single
+# 2-minute interval has seen 10+ multicast frames, so a quiet network never
+# triggers it. Armed, connected, and no multicast for 10 minutes = stall.
+#
+# Recovery: save evidence, email (step 17's pi-alert, if installed), reboot.
+# Never bounce the link: when the Pi drops its own connection, the router can
+# refuse it for 7-10 minutes. At most one stall reboot per 6 hours, in case
+# the router is at fault; after that it reports once and waits.
+
+STALL_SECS=600
+REBOOT_GAP=21600
+RUN=/run/wifi-stall-detector
+KEEP=/var/lib/wifi-stall-detector
+mkdir -p "$RUN" "$KEEP"
+now=$(date +%s)
+host=$(hostname)
+
+alert() {   # subject, body; best effort, a failed email never blocks recovery
+    [ -x /usr/local/sbin/pi-alert ] || return 0
+    timeout 45 /usr/local/sbin/pi-alert "$1" "$2" || logger -t wifi-stall "alert email failed: $1"
+}
 
 for wdir in /sys/class/net/*/wireless; do
     [ -d "$wdir" ] || continue
     IFACE=$(basename "$(dirname "$wdir")")
+    mc=$(cat "/sys/class/net/$IFACE/statistics/multicast" 2>/dev/null) || continue
+    last="$RUN/last.$IFACE"
 
-    if ip -6 addr show dev "$IFACE" scope global 2>/dev/null | grep -q dynamic; then
-        touch "$STATE/seen.$IFACE"
-        rm -f "$STATE/fails.$IFACE" "$STATE/bounces.$IFACE"
+    # Not associated is a different problem; wpa_supplicant handles reconnects.
+    if ! iw dev "$IFACE" link 2>/dev/null | grep -q '^Connected to'; then
+        echo "$mc $now" > "$last"
         continue
     fi
+    if [ ! -f "$last" ]; then
+        echo "$mc $now" > "$last"
+        continue
+    fi
+    read -r last_mc last_t < "$last"
+    if [ "$mc" != "$last_mc" ]; then
+        [ $((mc - last_mc)) -ge 10 ] && touch "$RUN/armed.$IFACE"
+        echo "$mc $now" > "$last"
+        rm -f "$RUN/held.$IFACE"
+        continue
+    fi
+    [ -f "$RUN/armed.$IFACE" ] || continue
+    quiet=$((now - last_t))
+    [ "$quiet" -lt "$STALL_SECS" ] && continue
 
-    if [ ! -f "$STATE/seen.$IFACE" ]; then
-        if [ ! -f "$STATE/no-ra-warned.$IFACE" ]; then
-            logger -t wifi-watchdog "$IFACE: no RA-derived IPv6 address seen this boot — detector idle (network may lack IPv6 RAs)"
-            touch "$STATE/no-ra-warned.$IFACE"
+    # Rebooted for a stall recently? Then the router may be at fault:
+    # report once and wait instead of rebooting in a loop.
+    if [ -f "$KEEP/last-reboot" ] && [ $((now - $(cat "$KEEP/last-reboot"))) -lt "$REBOOT_GAP" ]; then
+        if [ ! -f "$RUN/held.$IFACE" ]; then
+            touch "$RUN/held.$IFACE"
+            logger -t wifi-stall "$IFACE: no multicast for ${quiet}s while connected; not rebooting, one stall reboot already in the last 6 h"
+            alert "$host: Wi-Fi stall again, not rebooting" \
+"$IFACE has received no multicast for ${quiet}s while connected, and $host already rebooted for a stall in the last 6 hours. Not rebooting again: the router may be the problem. LAN access to the Pi is probably down; its internet access still works."
         fi
         continue
     fi
 
-    FAILS=$(( $(cat "$STATE/fails.$IFACE" 2>/dev/null || echo 0) + 1 ))
-    echo "$FAILS" > "$STATE/fails.$IFACE"
-    [ "$FAILS" -lt 3 ] && continue
-
-    BOUNCES=$(( $(cat "$STATE/bounces.$IFACE" 2>/dev/null || echo 0) + 1 ))
-    if [ "$BOUNCES" -gt 3 ]; then
-        logger -t wifi-watchdog "$IFACE: still no RA-derived address after 3 bounces — rebooting"
-        systemctl reboot
-        exit 0
-    fi
-    echo "$BOUNCES" > "$STATE/bounces.$IFACE"
-    echo 0 > "$STATE/fails.$IFACE"
-    logger -t wifi-watchdog "$IFACE: multicast RX stall suspected (dynamic IPv6 gone for $FAILS checks) — bouncing interface (attempt $BOUNCES/3)"
-    ip link set "$IFACE" down
-    sleep 2
-    ip link set "$IFACE" up
+    dir="$KEEP/$(date +%Y%m%d-%H%M%S)"
+    mkdir -p "$dir"
+    logger -t wifi-stall "$IFACE: no multicast for ${quiet}s while connected; saving evidence to $dir, then rebooting"
+    { date; ip -s link show "$IFACE"; } > "$dir/link.txt" 2>&1
+    iw dev "$IFACE" link > "$dir/iw-link.txt" 2>&1
+    iw dev "$IFACE" station dump > "$dir/station.txt" 2>&1
+    ip neigh show dev "$IFACE" > "$dir/neigh.txt" 2>&1
+    ip addr show dev "$IFACE" > "$dir/addr.txt" 2>&1
+    command -v wpa_cli >/dev/null 2>&1 && wpa_cli -i "$IFACE" status > "$dir/wpa.txt" 2>&1
+    command -v tcpdump >/dev/null 2>&1 && timeout 60 tcpdump -ni "$IFACE" -w "$dir/group.pcap" 'broadcast or multicast' >/dev/null 2>&1
+    echo "$now" > "$KEEP/last-reboot"
+    echo "$dir" > "$KEEP/pending-report"
+    alert "$host: Wi-Fi stall, rebooting" \
+"$IFACE received no multicast for ${quiet}s while connected, so $host had dropped off the LAN. Evidence saved in $dir. Rebooting now; a boot report follows."
+    systemctl reboot
+    exit 0
 done
 exit 0
 EOF
-chmod 755 "$WD_SCRIPT"
-log "Watchdog script installed at $WD_SCRIPT"
+chmod 755 "$SD_SCRIPT"
 
-cat > /etc/systemd/system/wifi-multicast-watchdog.service << EOF
+cat > /etc/systemd/system/wifi-stall-detector.service << EOF
 [Unit]
-Description=Check for Wi-Fi multicast RX stall and recover
+Description=Detect a Wi-Fi broadcast/multicast stall and recover
 
 [Service]
 Type=oneshot
-ExecStart=$WD_SCRIPT
+ExecStart=$SD_SCRIPT
+TimeoutStartSec=5min
 EOF
 
-cat > /etc/systemd/system/wifi-multicast-watchdog.timer << 'EOF'
+cat > /etc/systemd/system/wifi-stall-detector.timer << 'EOF'
 [Unit]
-Description=Wi-Fi multicast-stall watchdog (every 2 min)
+Description=Wi-Fi stall detector (every 2 min)
 
 [Timer]
-OnBootSec=2min
+OnBootSec=5min
 OnUnitActiveSec=2min
 
 [Install]
@@ -1240,9 +1367,9 @@ WantedBy=timers.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now wifi-multicast-watchdog.timer
-log "wifi-multicast-watchdog.timer enabled (checks every 2 min)"
-info "Watchdog activity logs under: journalctl -t wifi-watchdog"
+systemctl enable --now wifi-stall-detector.timer
+log "wifi-stall-detector.timer enabled (every 2 min, starting 5 min after boot)"
+info "Detector activity: journalctl -t wifi-stall · evidence: /var/lib/wifi-stall-detector/"
 
 }
 
@@ -1573,48 +1700,286 @@ fi
 
 
 # =============================================================================
-# STEP 16: Scheduled monthly reboot
+# STEP 16: Reboots: manual, with an email when one is needed
 # =============================================================================
 
+RN_SCRIPT="/usr/local/sbin/reboot-needed-alert"
 STEP16_DONE=""
-if systemctl is-enabled --quiet scheduled-reboot.timer 2>/dev/null; then
-    STEP16_DONE="scheduled-reboot.timer is enabled ($(systemctl show scheduled-reboot.timer -p NextElapseUSecRealtime --value 2>/dev/null | head -1))."
+if [ ! -e /etc/systemd/system/scheduled-reboot.timer ] \
+   && [ -x "$RN_SCRIPT" ] && systemctl is-enabled --quiet reboot-needed-alert.timer 2>/dev/null; then
+    STEP16_DONE="No scheduled reboots; reboot-needed-alert.timer is enabled."
 fi
 
-confirm_step 16 "Scheduled monthly reboot" \
-"Cheap insurance against long-uptime rot. The Pi's Wi-Fi firmware is
-known to wedge after months of uptime (requiring a physical power
-cycle), and security updates from step 8 include kernels that only
-take effect after a reboot. This installs a systemd timer that
-reboots the Pi at 04:00 on the 1st of every month.
-Skip if you prefer manual reboots." \
+confirm_step 16 "Reboots: manual, with an email when one is needed" \
+"Security updates (step 8) include kernels that only take effect after
+a reboot, and step 8 never reboots on its own. This installs a daily
+check that emails you (step 17) when /var/run/reboot-required appears,
+once per set of pending packages, so you reboot when it suits you.
+It also removes the monthly scheduled reboot that earlier versions of
+this script installed. A calendar reboot doesn't prevent the Wi-Fi
+stall (step 11 handles that), and every reboot is a chance to hit the
+logind boot race (step 18 heals that)." \
 "$STEP16_DONE" && {
 
-cat > /etc/systemd/system/scheduled-reboot.service << 'EOF'
+if [ -e /etc/systemd/system/scheduled-reboot.timer ] || [ -e /etc/systemd/system/scheduled-reboot.service ]; then
+    systemctl disable --now scheduled-reboot.timer 2>/dev/null || true
+    rm -f /etc/systemd/system/scheduled-reboot.timer /etc/systemd/system/scheduled-reboot.service
+    log "Removed the monthly scheduled reboot"
+fi
+
+cat > "$RN_SCRIPT" << 'EOF'
+#!/bin/sh
+# reboot-needed-alert: emails once when updates are waiting for a reboot.
+# Installed by harden-pi.sh step 16. Runs daily as root.
+[ -f /var/run/reboot-required ] || exit 0
+[ -x /usr/local/sbin/pi-alert ] || exit 0
+pkgs=$(sort -u /var/run/reboot-required.pkgs 2>/dev/null | tr '\n' ' ')
+mkdir -p /var/lib/reboot-needed-alert
+stamp=/var/lib/reboot-needed-alert/last
+key=$(printf '%s' "$pkgs" | sha256sum | cut -c1-16)
+[ "$(cat "$stamp" 2>/dev/null)" = "$key" ] && exit 0
+if timeout 45 /usr/local/sbin/pi-alert "$(hostname): reboot needed" \
+"Updates are waiting for a reboot: ${pkgs:-(no package list)}
+Reboot when it suits you: sudo systemctl reboot"; then
+    echo "$key" > "$stamp"
+fi
+EOF
+chmod 755 "$RN_SCRIPT"
+
+cat > /etc/systemd/system/reboot-needed-alert.service << EOF
 [Unit]
-Description=Scheduled maintenance reboot
+Description=Email when updates are waiting for a reboot
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/systemctl reboot
+ExecStart=$RN_SCRIPT
 EOF
 
-cat > /etc/systemd/system/scheduled-reboot.timer << 'EOF'
+cat > /etc/systemd/system/reboot-needed-alert.timer << 'EOF'
 [Unit]
-Description=Monthly maintenance reboot (1st of month, 04:00)
+Description=Daily check for a pending reboot
 
 [Timer]
-OnCalendar=*-*-01 04:00:00
-# No Persistent=true: if the Pi was off at 4am, don't reboot it right
-# after someone powers it on.
+OnCalendar=*-*-* 09:00:00
+Persistent=true
 
 [Install]
 WantedBy=timers.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now scheduled-reboot.timer
-log "Monthly reboot scheduled: $(systemctl show scheduled-reboot.timer -p NextElapseUSecRealtime --value | head -1)"
+systemctl enable --now reboot-needed-alert.timer
+log "reboot-needed-alert.timer enabled (daily at 09:00; emails once per pending reboot)"
+
+}
+
+
+# =============================================================================
+# STEP 17: Email alerts
+# =============================================================================
+
+ALERT_BIN="/usr/local/sbin/pi-alert"
+STEP17_DONE=""
+if [ -x "$ALERT_BIN" ] && [ -f /etc/msmtprc ] && [ -f /etc/pi-alert.conf ]; then
+    STEP17_DONE="pi-alert is configured (msmtp, sending to $(. /etc/pi-alert.conf 2>/dev/null; echo "${ALERT_TO:-?}"))."
+fi
+
+confirm_step 17 "Email alerts (Wi-Fi stalls, boot self-heal, pending reboots)" \
+"Steps 11, 16 and 18 send short emails through 'pi-alert'. This installs
+msmtp and sends through Gmail's SMTP server with an app password.
+Use a separate Gmail account just for these alerts, not your main one:
+an app password can read and send all of that account's mail, and it
+will sit on this Pi. Create the account, turn on 2-Step Verification,
+then make an app password at https://myaccount.google.com/apppasswords
+The config is root-only (mode 600), so the AI user can't read it.
+You'll be asked for the sender address, the app password (hidden) and
+where to send alerts. A test email goes out at the end." \
+"$STEP17_DONE" && {
+
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq msmtp
+
+ALERT_FROM=""
+while [[ ! "$ALERT_FROM" =~ ^[^@[:space:]\']+@[^@[:space:]\']+\.[^@[:space:]\']+$ ]]; do
+    read -r -p "  Sender address (the alerts-only Gmail account): " ALERT_FROM
+done
+ALERT_PASS=""
+while [ -z "$ALERT_PASS" ]; do
+    read -r -s -p "  App password for $ALERT_FROM (input hidden): " ALERT_PASS
+    echo ""
+    ALERT_PASS="${ALERT_PASS// /}"   # Google shows it in groups of four
+done
+ALERT_TO=""
+while [[ ! "$ALERT_TO" =~ ^[^@[:space:]\']+@[^@[:space:]\']+\.[^@[:space:]\']+$ ]]; do
+    read -r -p "  Send alerts to [$ALERT_FROM]: " ALERT_TO
+    ALERT_TO="${ALERT_TO:-$ALERT_FROM}"
+done
+
+(
+umask 077
+cat > /etc/msmtprc << EOF
+# Written by harden-pi.sh step 17. Root only (mode 600): holds an app password.
+defaults
+auth           on
+tls            on
+tls_starttls   on
+tls_trust_file /etc/ssl/certs/ca-certificates.crt
+syslog         LOG_MAIL
+
+account        alerts
+host           smtp.gmail.com
+port           587
+from           $ALERT_FROM
+user           $ALERT_FROM
+password       $ALERT_PASS
+
+account default : alerts
+EOF
+printf "ALERT_FROM='%s'\nALERT_TO='%s'\n" "$ALERT_FROM" "$ALERT_TO" > /etc/pi-alert.conf
+)
+unset ALERT_PASS
+chown root:root /etc/msmtprc /etc/pi-alert.conf
+chmod 600 /etc/msmtprc /etc/pi-alert.conf
+
+cat > "$ALERT_BIN" << 'EOF'
+#!/bin/sh
+# pi-alert SUBJECT [BODY]: email an alert through msmtp.
+# Installed by harden-pi.sh step 17. Root only: /etc/msmtprc holds the
+# alerts account's app password.
+. /etc/pi-alert.conf
+{
+    printf 'From: %s\n' "$ALERT_FROM"
+    printf 'To: %s\n' "$ALERT_TO"
+    printf 'Subject: %s\n' "$1"
+    printf 'Date: %s\n' "$(date -R)"
+    printf 'Content-Type: text/plain; charset=UTF-8\n'
+    printf '\n%s\n\n-- \n%s, %s\n' "${2:-}" "$(hostname)" "$(date '+%Y-%m-%d %H:%M %Z')"
+} | msmtp -C /etc/msmtprc -a alerts "$ALERT_TO"
+EOF
+chown root:root "$ALERT_BIN"
+chmod 700 "$ALERT_BIN"
+
+if "$ALERT_BIN" "$(hostname): alert email works" \
+"Sent by harden-pi.sh step 17. Wi-Fi stalls, boot self-heals and pending reboots will arrive like this."; then
+    log "Test email sent — check the inbox (and the spam folder) for it"
+else
+    err "Test email failed. Check the address and app password, then re-run step 17."
+    info "msmtp logs to the journal: journalctl -t msmtp -n 20"
+fi
+
+}
+
+
+# =============================================================================
+# STEP 18: Boot self-heal (logind race)
+# =============================================================================
+
+BH_SCRIPT="/usr/local/sbin/boot-health-check"
+STEP18_DONE=""
+if [ -x "$BH_SCRIPT" ] && systemctl is-enabled --quiet boot-health-check.timer 2>/dev/null; then
+    STEP18_DONE="boot-health-check.timer is enabled (runs 5 min after every boot)."
+fi
+
+confirm_step 18 "Boot self-heal (logind race)" \
+"On some boots, early services (D-Bus, logind, polkit, avahi) stall
+together for 30-80 seconds. Usually they recover. Once, logind came out
+of it without its D-Bus name: SSH logins hung for 25 s each, and every
+lingering user's service manager (user@UID) failed to start, so all
+user services stayed down until logind was restarted by hand.
+This installs a one-shot check 5 minutes after every boot. If logind
+has no bus name, or a lingering user's manager isn't running, it
+restarts logind and starts the managers. It emails you (step 17) when
+it had to act, and after any reboot by the Wi-Fi stall detector." \
+"$STEP18_DONE" && {
+
+cat > "$BH_SCRIPT" << 'EOF'
+#!/bin/sh
+# boot-health-check: heals the logind boot race, then reports.
+# Installed by harden-pi.sh step 18. Runs once, 5 minutes after boot.
+
+alert() {   # subject, body; best effort
+    [ -x /usr/local/sbin/pi-alert ] || return 0
+    timeout 45 /usr/local/sbin/pi-alert "$1" "$2" || logger -t boot-health "alert email failed: $1"
+}
+
+lingering_uids() {
+    for f in /var/lib/systemd/linger/*; do
+        [ -e "$f" ] && id -u "$(basename "$f")" 2>/dev/null
+    done
+}
+
+problems() {
+    p=""
+    busctl status org.freedesktop.login1 >/dev/null 2>&1 || p="logind has no D-Bus name;"
+    for uid in $(lingering_uids); do
+        systemctl is-active --quiet "user@$uid.service" || p="$p user@$uid is not running;"
+    done
+    printf '%s' "$p"
+}
+
+found=$(problems)
+outcome=""
+if [ -n "$found" ]; then
+    logger -t boot-health "found:$found restarting systemd-logind"
+    systemctl restart systemd-logind
+    sleep 5
+    for uid in $(lingering_uids); do
+        systemctl start "user@$uid.service" || true
+    done
+    sleep 5
+    left=$(problems)
+    if [ -z "$left" ]; then
+        outcome="Fixed: restarted logind and started the user managers."
+        logger -t boot-health "healed"
+    else
+        outcome="Still broken after restarting logind:$left Try: sudo systemctl restart systemd-logind, or reboot."
+        logger -t boot-health "still broken:$left"
+    fi
+fi
+
+stall=""
+if [ -f /var/lib/wifi-stall-detector/pending-report ]; then
+    stall=$(cat /var/lib/wifi-stall-detector/pending-report)
+    rm -f /var/lib/wifi-stall-detector/pending-report
+fi
+
+if [ -n "$found" ] || [ -n "$stall" ]; then
+    body="Booted at $(uptime -s)."
+    [ -n "$stall" ] && body="$body This boot followed a Wi-Fi stall reboot (evidence: $stall)."
+    if [ -n "$found" ]; then
+        body="$body Found:$found $outcome"
+    else
+        body="$body logind and the user services came up normally."
+    fi
+    alert "$(hostname): boot report" "$body"
+fi
+exit 0
+EOF
+chmod 755 "$BH_SCRIPT"
+
+cat > /etc/systemd/system/boot-health-check.service << EOF
+[Unit]
+Description=Heal the logind boot race and report
+
+[Service]
+Type=oneshot
+ExecStart=$BH_SCRIPT
+TimeoutStartSec=3min
+EOF
+
+cat > /etc/systemd/system/boot-health-check.timer << 'EOF'
+[Unit]
+Description=Boot health check (5 min after boot)
+
+[Timer]
+OnBootSec=5min
+
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl daemon-reload
+systemctl enable boot-health-check.timer
+log "boot-health-check.timer enabled (runs 5 min after every boot)"
 
 }
 
@@ -1643,7 +2008,9 @@ echo "  Disk filling                  Fixed-size filesystem on /srv/$AI_USER"
 echo "  Process snooping              hidepid=2 on /proc"
 echo "  SSH brute force               Key-only + fail2ban (journald backend)"
 echo "  Unpatched exploits            Auto security updates"
-echo "  Silent Wi-Fi dropouts         Power save off + multicast-stall watchdog"
+echo "  Silent Wi-Fi dropouts         Power save off + driver options + stall detector"
+echo "  Boot races (logind)           Self-heal 5 min after every boot"
+echo "  Problems you would miss       Email alerts (stalls, self-heals, pending reboots)"
 echo "  No forensic trail             auditd logs every AI command"
 echo "  Exposed home IP / open ports  Cloudflare Tunnel (outbound-only)"
 echo ""
@@ -1663,4 +2030,8 @@ echo "  ⚠️  BEFORE YOU REBOOT:"
 echo "  1. Verify SSH key is in /home/$MAIN_USER/.ssh/authorized_keys"
 echo "  2. Test SSH in a NEW terminal"
 echo "  3. Then: sudo systemctl restart ssh"
+if [ "$WIFI_DRIVER_OPTS_WRITTEN" = true ]; then
+    echo "  4. Reboot once so the Wi-Fi driver options from step 11 load:"
+    echo "     sudo systemctl reboot"
+fi
 echo ""

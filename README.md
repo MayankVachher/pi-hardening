@@ -18,7 +18,7 @@ The script will ask for your username and the AI account name, then walk you thr
 
 ## What It Does
 
-The script runs 16 steps, each explained and requiring your confirmation:
+The script runs 18 steps, each explained and requiring your confirmation:
 
 | Step | What | Why |
 |------|-------|-----|
@@ -32,12 +32,14 @@ The script runs 16 steps, each explained and requiring your confirmation:
 | 8 | Auto security updates | Daily patches for kernel/system exploits |
 | 9 | Create project directories | Separated /srv dirs with ACL for read access |
 | 10 | Install & configure Caddy | Dual reverse proxy — you own routing, AI owns its sandbox |
-| 11 | Wi-Fi reliability | Pi stays reachable across two Broadcom firmware failure modes. (a) Power save naps: boot-time `iw set power_save off` unit (stack-agnostic — an NM config alone is a silent no-op on netplan/systemd-networkd; that config is written too). (b) Silent multicast RX stall: after long uptimes the firmware stops receiving broadcast/multicast — outbound internet keeps working but LAN ARP/mDNS go unanswered, so ping-based watchdogs never fire. A 2-min watchdog timer detects the RA-derived IPv6 address vanishing (RAs are multicast — the one on-box symptom) and bounces the interface; after 3 failed bounces it reboots. Inert on networks without IPv6 RAs |
+| 11 | Wi-Fi reliability | Keeps the Pi reachable when its Broadcom chip (CYW43455) silently stops passing broadcast/multicast to Linux while staying connected: unicast and outbound traffic keep working, but LAN peers can't ARP the Pi and mDNS goes quiet ([raspberrypi/linux#2522](https://github.com/raspberrypi/linux/issues/2522)). Nothing is logged when it starts. (a) Power save off at every boot (stack-agnostic `iw` unit; an NM config alone is a silent no-op on netplan/systemd-networkd, so it's written too). (b) The brcmfmac options Raspberry Pi OS ships since April 2025, `roamoff=1 feature_disable=0x282000` (firmware roaming, FWSUP, SAE offload and the channel survey off; active after a reboot). (c) A 2-min stall detector: connected but the kernel's multicast counter flat for 10 min means a stall, so it saves evidence (incl. a 60 s capture), emails you (step 17) and reboots, at most once per 6 h. It never bounces the link: when the Pi drops its own connection the router can refuse it for 7-10 min. It stays inert on networks too quiet to judge. Replaces the older watchdog, which watched an IPv6 address from another device's router ads and is removed |
 | 12 | Cap AI disk usage | Fixed-size sparse disk image mounted at `/srv/<ai-user>` — the AI can never fill your SD card |
 | 13 | Hide processes (hidepid) | AI can't read other users' `/proc` entries — no snooping on command lines with secrets in them |
 | 14 | Audit trail (auditd) | Every command the AI runs is logged — `sudo ausearch -k ai-agent -i` |
 | 15 | Cloudflare Tunnel | Outbound-only exposure — no router port forwards, home IP hidden, routing controlled from your Cloudflare dashboard |
-| 16 | Scheduled monthly reboot | Long uptimes wedge the Wi-Fi firmware (needs a physical power cycle) and leave kernel updates unapplied — a 4am reboot on the 1st resets the clock |
+| 16 | Reboots: manual, emailed | No scheduled reboots (removes the old monthly timer): a calendar reboot doesn't prevent the Wi-Fi stall, and every boot is a chance to hit the logind race. A daily check emails you (step 17) when `/var/run/reboot-required` appears, once per set of pending packages |
+| 17 | Email alerts | `pi-alert` sends short emails through Gmail SMTP with `msmtp` and an app password. Use a dedicated alerts-only account: an app password can read and send that whole mailbox. Config is root-only (600); verify checks the AI can't read it. Sends a test email |
+| 18 | Boot self-heal | Some boots stall D-Bus, logind, polkit and avahi together for 30-80 s. Once, logind came out without its D-Bus name, so SSH logins hung and every lingering user's services stayed down. A one-shot check 5 min after boot restarts logind and the user managers if needed, and emails a boot report after any self-heal or stall reboot |
 
 ## Verify Mode
 
@@ -54,6 +56,8 @@ Doesn't trust config files — it runs the actual attacks **as the AI user** and
 - DNS + internet **as the AI** → must still work
 - SSH checked via `sshd -T` (the *effective* config, not just files)
 - fail2ban jail actually active, limits/updates/disk cap/hidepid/auditd in place
+- Wi-Fi: power save off, Broadcom driver options loaded, stall detector enabled, old watchdog gone
+- no scheduled reboot; alert email config root-only and unreadable by the AI; logind holding its D-Bus name
 
 Exits non-zero if anything fails. Run it after hardening, after any system change, and after reboots if you're paranoid.
 
