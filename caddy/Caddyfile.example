@@ -3,11 +3,18 @@
 # Location: /etc/caddy/Caddyfile
 #
 # How this works:
-#   Caddy automatically gets HTTPS certificates from Let's Encrypt.
-#   Each block below maps a subdomain to a local port where your app runs.
-#   For example: bloodhound.YOUR_DOMAIN → localhost:3000
+#   Each site block maps a hostname to a local port where your app runs, and
+#   Caddy gets a Let's Encrypt certificate for every block. Only add a block
+#   for a hostname whose DNS points at this machine, with ports 80/443
+#   reachable from the internet. For any other hostname Caddy retries the
+#   certificate forever, logging errors and writing lock files as it goes.
 #
-# To add a new project:
+# Using a Cloudflare Tunnel (step 15)?
+#   Route each public hostname straight to its app's local port in the
+#   Cloudflare dashboard, e.g. docket.YOUR_DOMAIN -> http://localhost:3002.
+#   Cloudflare handles HTTPS, and this Caddy needs no site blocks at all.
+#
+# To add a project (no tunnel):
 #   1. Add a block like:
 #        myapp.YOUR_DOMAIN {
 #            reverse_proxy localhost:PORT
@@ -19,7 +26,8 @@
 #
 # The AI sandbox block (ai.YOUR_DOMAIN) forwards all AI traffic to port 4000,
 # where the AI runs its own Caddy instance. The AI cannot modify THIS file —
-# it can only control routing within its own sandbox.
+# it can only control routing within its own sandbox. With a tunnel, route
+# ai.YOUR_DOMAIN to http://localhost:4000 in the dashboard instead.
 #
 # SECURITY NOTES:
 # • This Caddy's admin API (localhost:2019) is firewalled from the AI user
@@ -32,21 +40,15 @@
 #       reverse_proxy unix//run/myapp/myapp.sock
 # =============================================================================
 
-# Your projects — each subdomain routes to the app's local port
-bloodhound.YOUR_DOMAIN {
-    reverse_proxy localhost:3000
-}
-
-kaal.YOUR_DOMAIN {
-    reverse_proxy localhost:3001
-}
-
-tribute.YOUR_DOMAIN {
-    reverse_proxy localhost:3002
-}
-
-# AI sandbox — all traffic to ai.YOUR_DOMAIN goes to AI's own Caddy on :4000
-# The AI controls routing from there (see /srv/<ai-user>/Caddyfile)
-ai.YOUR_DOMAIN {
-    reverse_proxy localhost:4000
-}
+# Example blocks, commented out. Uncomment and adapt only for hostnames that
+# point at this machine (see "How this works" above).
+#
+# myapp.YOUR_DOMAIN {
+#     reverse_proxy localhost:3000
+# }
+#
+# AI sandbox: all traffic to ai.YOUR_DOMAIN goes to the AI's own Caddy on
+# :4000, which routes it from there (see /srv/<ai-user>/Caddyfile).
+# ai.YOUR_DOMAIN {
+#     reverse_proxy localhost:4000
+# }

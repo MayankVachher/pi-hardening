@@ -982,6 +982,11 @@ Caddy's admin API (:2019) is firewalled from the AI (step 4).
 listens on 3000. If your app is down, any local user could bind that
 port and receive its traffic. For sensitive apps, prefer unix sockets
 (see comments in the generated Caddyfile).
+Using a Cloudflare Tunnel (step 15)? Route hostnames straight to app
+ports in the dashboard; the main Caddyfile ships with no live sites.
+Re-running this step replaces an untouched copy of the old example
+Caddyfile, whose example sites made Caddy retry certificates forever,
+and keeps a backup in /etc/caddy/.
 You'll be prompted for your domain name (e.g. example.com)." \
 "$STEP10_DONE" && {
 
@@ -1013,10 +1018,29 @@ fi
 # Detect script directory for config templates
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Set up main Caddyfile if not present or still the stock package default.
-# Match only UNcommented reverse_proxy — the stock Debian Caddyfile contains
-# '# reverse_proxy localhost:8080' as a comment, which must not count.
-if [ ! -f /etc/caddy/Caddyfile ] || ! grep -qE '^\s*reverse_proxy' /etc/caddy/Caddyfile; then
+# Untouched copies of the example Caddyfile this script used to ship (the
+# template and the inline fallback below), hashed with the domain put back to
+# YOUR_DOMAIN. Their live example sites made Caddy retry Let's Encrypt
+# certificates forever wherever those hostnames don't point at this Pi, e.g.
+# behind a Cloudflare Tunnel. An untouched copy is safe to replace; a file
+# you've edited hashes differently and is left alone.
+OLD_EXAMPLE_SHA256="419306a28036d1a8be906cec7d1957590f0deb037c9754937c54877190359df6 bb9f1b78ea263aae4a30c30870935e513bd52f17e096b5e189fd171063db3aff"
+CADDY_OLD_EXAMPLE=false
+if [ -f /etc/caddy/Caddyfile ] && [ "$DOMAIN" != "YOUR_DOMAIN" ]; then
+    CF_HASH=$(sed "s/${DOMAIN//./\\.}/YOUR_DOMAIN/g" /etc/caddy/Caddyfile | sha256sum | cut -d' ' -f1)
+    case " $OLD_EXAMPLE_SHA256 " in *" $CF_HASH "*) CADDY_OLD_EXAMPLE=true ;; esac
+fi
+if $CADDY_OLD_EXAMPLE; then
+    CF_BACKUP="/etc/caddy/Caddyfile.old-example.$(date +%Y%m%d%H%M%S)"
+    cp /etc/caddy/Caddyfile "$CF_BACKUP"
+    warn "Main Caddyfile is an untouched copy of the old example; replacing it (backup: $CF_BACKUP)"
+fi
+
+# Set up main Caddyfile if not present, still the stock package default, or
+# the untouched old example. Match only UNcommented reverse_proxy — the stock
+# Debian Caddyfile contains '# reverse_proxy localhost:8080' as a comment,
+# which must not count.
+if [ ! -f /etc/caddy/Caddyfile ] || ! grep -qE '^\s*reverse_proxy' /etc/caddy/Caddyfile || $CADDY_OLD_EXAMPLE; then
     if [ -f "$SCRIPT_DIR/caddy/Caddyfile.example" ]; then
         cp "$SCRIPT_DIR/caddy/Caddyfile.example" /etc/caddy/Caddyfile
     else
@@ -1033,23 +1057,19 @@ if [ ! -f /etc/caddy/Caddyfile ] || ! grep -qE '^\s*reverse_proxy' /etc/caddy/Ca
 # port and receive its traffic. For sensitive apps, use unix sockets:
 #     reverse_proxy unix//run/myapp/myapp.sock
 
-# Your projects
-bloodhound.$DOMAIN {
-    reverse_proxy localhost:3000
-}
-
-kaal.$DOMAIN {
-    reverse_proxy localhost:3001
-}
-
-tribute.$DOMAIN {
-    reverse_proxy localhost:3002
-}
-
+# Using a Cloudflare Tunnel? Route hostnames straight to app ports in the
+# dashboard and leave this file without site blocks. Otherwise only add a
+# block for a hostname that points at this machine: for any other, Caddy
+# retries its certificate forever.
+#
+# myapp.$DOMAIN {
+#     reverse_proxy localhost:3000
+# }
+#
 # AI sandbox — forwards to AI's own Caddy on :4000
-ai.$DOMAIN {
-    reverse_proxy localhost:4000
-}
+# ai.$DOMAIN {
+#     reverse_proxy localhost:4000
+# }
 CADDYEOF
     fi
     # Replace YOUR_DOMAIN with the actual domain (handles both template and inline)
